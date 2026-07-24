@@ -1,0 +1,28 @@
+CARNOVA OIL CLUB — ARQUIVO FINAL LIMPO
+
+ESTRUTURA CORRETA:
+- app.py
+- render.yaml
+- requirements.txt
+- README.md
+- .python-version
+- static/style.css
+- templates/*.html
+
+COMO ENVIAR AO GITHUB:
+1. Extraia este ZIP.
+2. Abra a pasta extraída "carnova-oil-club".
+3. Selecione TODO O CONTEÚDO que está dentro dela.
+4. No GitHub, clique em "uploading an existing file".
+5. Arraste os arquivos e as pastas static e templates.
+6. Não arraste uma pasta chamada templates que contenha app.py.
+7. Antes do commit, confira:
+   /app.py
+   /static/style.css
+   /templates/base.html
+8. Clique em Commit changes.
+
+O ZIP foi verificado e não contém:
+- templates/app.py
+- templates/templates/
+- arquivos duplicados

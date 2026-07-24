@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block content %}<h1>Oil Club Dashboard</h1><section class="stats">
+<div class="card"><small>Total Members</small><strong>{{ stats.total_members }}</strong></div><div class="card"><small>Active Members</small><strong>{{ stats.active_members }}</strong></div>
+<div class="card"><small>Oil Changes Remaining</small><strong>{{ stats.remaining_changes }}</strong></div><div class="card"><small>Redeemed</small><strong>{{ stats.redeemed_changes }}</strong></div></section>
+<form class="search"><input name="q" value="{{ q }}" placeholder="Search name, phone, email, or Member ID"><button class="button">Search</button></form>
+<div class="card table"><table><thead><tr><th>Member ID</th><th>Customer</th><th>Phone</th><th>Expires</th><th>Remaining</th></tr></thead><tbody>
+{% for m in members %}<tr><td><a href="{{ url_for('member_detail',member_id=m.member_id) }}"><b>{{ m.member_id }}</b></a></td><td>{{ m.name }}<br><small>{{ m.email }}</small></td>
+<td>{{ m.phone or "—" }}</td><td>{{ m.expiration_date }}</td><td><b>{{ m.remaining_changes }}/{{ m.total_changes }}</b></td></tr>
+{% else %}<tr><td colspan="5">No members yet.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}

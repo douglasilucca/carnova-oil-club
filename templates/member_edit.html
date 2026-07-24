@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="card form" method="post">
+  <p class="muted">{{ member.member_id }}</p>
+  <h1>Edit Member</h1>
+  <label>Customer name<input name="name" value="{{ member.name }}" required></label>
+  <label>Email<input type="email" name="email" value="{{ member.email }}" required></label>
+  <label>Phone<input name="phone" value="{{ member.phone or '' }}"></label>
+  <label>Expiration date<input type="date" name="expiration_date" value="{{ member.expiration_date }}" required></label>
+  <label>Status
+    <select name="status">
+      {% for option in ['active','cancelled','expired','completed'] %}
+      <option value="{{ option }}" {% if member.status == option %}selected{% endif %}>{{ option }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button class="button primary">Save Changes</button>
+</form>
+{% endblock %}

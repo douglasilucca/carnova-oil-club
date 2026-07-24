@@ -1,0 +1,4 @@
+{% extends "base.html" %}{% block content %}<form class="card form" method="post"><h1>Create Member</h1><label>Customer name<input name="name" required></label>
+<label>Email<input type="email" name="email" required></label><label>Phone<input name="phone"></label><label>Purchase date<input type="date" name="purchase_date"></label>
+<label>Expiration date<input type="date" name="expiration_date"></label><label>Total oil changes<select name="total_changes"><option selected>5</option><option>3</option><option>10</option></select></label>
+<button class="button primary">Create Membership</button></form>{% endblock %}

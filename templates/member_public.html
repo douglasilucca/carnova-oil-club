@@ -1,0 +1,3 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+<title>{{ member.member_id }}</title></head><body><main class="public"><div class="card center"><p class="gold"><b>CARNOVA OIL CLUB</b></p><h1>{{ member.name }}</h1><p>{{ member.member_id }}</p>
+<div class="big">{{ member.remaining_changes }}</div><p>oil changes remaining out of {{ member.total_changes }}</p><p>Valid through <b>{{ member.expiration_date }}</b></p><p>Present this page at Carnova of Southborough.</p></div></main></body></html>
