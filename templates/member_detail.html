@@ -1,6 +1,72 @@
-{% extends "base.html" %}{% block content %}<section class="member-header"><div><small>{{ member.member_id }}</small><h1>{{ member.name }}</h1><p>{{ member.email }} · {{ member.phone or "No phone" }}</p>
-<p>Purchased {{ member.purchase_date }} · Expires {{ member.expiration_date }}</p></div><div class="card counter"><small>Oil Changes Remaining</small><strong>{{ member.remaining_changes }}</strong><small>of {{ member.total_changes }}</small></div></section>
-<section class="columns"><div class="card"><h2>Redeem Service</h2><form method="post" action="{{ url_for('redeem',member_id=member.member_id) }}"><label>Service note<textarea name="note" placeholder="Vehicle, mileage, RO number"></textarea></label>
-<button class="button primary">Use 1 Oil Change</button></form>{% if redemptions %}<form method="post" action="{{ url_for('undo',member_id=member.member_id) }}"><button class="button">Undo Last Redemption</button></form>{% endif %}</div>
-<div class="card center"><h2>Member QR Code</h2><img class="qr" src="{{ url_for('member_qr',member_id=member.member_id) }}"><p class="muted">Scan to view status.</p></div></section>
-<div class="card"><h2>Redemption History</h2>{% for r in redemptions %}<div class="history"><b>{{ r.redeemed_at.strftime('%m/%d/%Y %I:%M %p') }}</b><p>{{ r.note or "Oil change redeemed" }}</p><small>{{ r.employee }}</small></div>{% else %}<p>No redemptions yet.</p>{% endfor %}</div>{% endblock %}
+{% extends "base.html" %}
+{% block title %}{{ member.member_id }} | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><a class="back" href="{{ url_for('dashboard') }}">← Dashboard</a><h1>{{ member.name }}</h1><p class="muted">{{ member.member_id }}</p></div>
+  <div class="actions">
+    <a class="button secondary" href="{{ url_for('member_qr', member_id=member.member_id) }}">Download QR</a>
+    <a class="button secondary" href="{{ url_for('edit_member', member_id=member.member_id) }}">Edit Member</a>
+  </div>
+</div>
+
+<section class="member-grid">
+  <article class="member-card">
+    <div class="member-card-top"><span class="brand-mark">C</span><span class="badge {{ member.status }}">{{ member.status }}</span></div>
+    <p class="eyebrow">CARNOVA OIL CLUB</p>
+    <h2>{{ member.name }}</h2>
+    <div class="remaining-number">{{ member.remaining_changes }}</div>
+    <p>premium full synthetic oil changes remaining</p>
+    <div class="progress"><span style="width: {{ (member.remaining_changes / member.total_changes * 100) if member.total_changes else 0 }}%"></span></div>
+    <div class="card-meta"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
+  </article>
+
+  <article class="panel details">
+    <h2>Member Information</h2>
+    <dl>
+      <div><dt>Email</dt><dd>{{ member.email }}</dd></div>
+      <div><dt>Phone</dt><dd>{{ member.phone or '—' }}</dd></div>
+      <div><dt>Purchase date</dt><dd>{{ member.purchase_date.strftime('%b %d, %Y') }}</dd></div>
+      <div><dt>Public card</dt><dd><a href="{{ public_url }}" target="_blank">Open customer card ↗</a></dd></div>
+    </dl>
+  </article>
+</section>
+
+<section class="panel redeem-panel">
+  <div><p class="eyebrow">SERVICE CHECK-IN</p><h2>Redeem an Oil Change</h2><p class="muted">Record vehicle and mileage for a complete service history.</p></div>
+  <form method="post" action="{{ url_for('redeem', member_id=member.member_id) }}" class="redeem-form">
+    <label>Vehicle<input name="vehicle" placeholder="Example: 2020 Toyota RAV4" required></label>
+    <label>VIN last 8<input name="vin_last8" maxlength="8" placeholder="12345678"></label>
+    <label>Mileage<input name="mileage" placeholder="65,240" required></label>
+    <label class="wide">Service notes<textarea name="note" rows="3" placeholder="Oil type, filter, observations..."></textarea></label>
+    <button class="button primary wide" type="submit" {% if member.status != 'active' %}disabled{% endif %}>Redeem One Oil Change</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-heading">
+    <div><p class="eyebrow">COMPLETE RECORD</p><h2>Service History</h2></div>
+    {% if redemptions %}
+    <form method="post" action="{{ url_for('undo', member_id=member.member_id) }}" onsubmit="return confirm('Undo the most recent service?')">
+      <button class="button danger" type="submit">Undo Latest</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Vehicle</th><th>VIN</th><th>Mileage</th><th>Employee</th><th>Notes</th></tr></thead>
+      <tbody>
+      {% for item in redemptions %}
+      <tr>
+        <td>{{ item.redeemed_at.strftime('%b %d, %Y %I:%M %p') }}</td>
+        <td>{{ item.vehicle or '—' }}</td>
+        <td>{{ item.vin_last8 or '—' }}</td>
+        <td>{{ item.mileage or '—' }}</td>
+        <td>{{ item.employee }}</td>
+        <td>{{ item.note or '—' }}</td>
+      </tr>
+      {% else %}<tr><td colspan="6" class="empty">No services recorded yet.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

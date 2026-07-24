@@ -1,3 +1,27 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
-<title>{{ member.member_id }}</title></head><body><main class="public"><div class="card center"><p class="gold"><b>CARNOVA OIL CLUB</b></p><h1>{{ member.name }}</h1><p>{{ member.member_id }}</p>
-<div class="big">{{ member.remaining_changes }}</div><p>oil changes remaining out of {{ member.total_changes }}</p><p>Valid through <b>{{ member.expiration_date }}</b></p><p>Present this page at Carnova of Southborough.</p></div></main></body></html>
+{% extends "base.html" %}
+{% block title %}{{ member.name }} | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="public-wrap">
+  <article class="member-card public-card">
+    <div class="member-card-top"><span class="brand-mark">C</span><span class="badge {{ member.status }}">{{ member.status }}</span></div>
+    <p class="eyebrow">CARNOVA OF SOUTHBOROUGH</p>
+    <h1>Oil Club</h1>
+    <h2>{{ member.name }}</h2>
+    <div class="remaining-number">{{ member.remaining_changes }}</div>
+    <p>premium full synthetic oil changes remaining</p>
+    <div class="progress"><span style="width: {{ (member.remaining_changes / member.total_changes * 100) if member.total_changes else 0 }}%"></span></div>
+    <div class="card-meta"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
+  </article>
+
+  <section class="panel">
+    <h2>Service History</h2>
+    {% for item in redemptions %}
+    <div class="public-history">
+      <strong>{{ item.redeemed_at.strftime('%B %d, %Y') }}</strong>
+      <span>{{ item.vehicle or 'Vehicle not recorded' }}{% if item.mileage %} · {{ item.mileage }} miles{% endif %}</span>
+    </div>
+    {% else %}<p class="muted">No oil changes have been redeemed yet.</p>{% endfor %}
+  </section>
+  <p class="public-note">Present this digital card at Carnova of Southborough when receiving service.</p>
+</section>
+{% endblock %}

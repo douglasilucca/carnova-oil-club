@@ -1,8 +1,74 @@
-{% extends "base.html" %}{% block content %}<h1>Oil Club Dashboard</h1><section class="stats">
-<div class="card"><small>Total Members</small><strong>{{ stats.total_members }}</strong></div><div class="card"><small>Active Members</small><strong>{{ stats.active_members }}</strong></div>
-<div class="card"><small>Oil Changes Remaining</small><strong>{{ stats.remaining_changes }}</strong></div><div class="card"><small>Redeemed</small><strong>{{ stats.redeemed_changes }}</strong></div></section>
-<form class="search"><input name="q" value="{{ q }}" placeholder="Search name, phone, email, or Member ID"><button class="button">Search</button></form>
-<div class="card table"><table><thead><tr><th>Member ID</th><th>Customer</th><th>Phone</th><th>Expires</th><th>Remaining</th></tr></thead><tbody>
-{% for m in members %}<tr><td><a href="{{ url_for('member_detail',member_id=m.member_id) }}"><b>{{ m.member_id }}</b></a></td><td>{{ m.name }}<br><small>{{ m.email }}</small></td>
-<td>{{ m.phone or "—" }}</td><td>{{ m.expiration_date }}</td><td><b>{{ m.remaining_changes }}/{{ m.total_changes }}</b></td></tr>
-{% else %}<tr><td colspan="5">No members yet.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Dashboard | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">CARNOVA OF SOUTHBOROUGH</p><h1>Oil Club Dashboard</h1></div>
+  <div class="actions">
+    <a class="button secondary" href="{{ url_for('export_members') }}">Export Members</a>
+    <a class="button primary" href="{{ url_for('new_member') }}">+ New Member</a>
+  </div>
+</div>
+
+<section class="stats">
+  <article><span>Total Members</span><strong>{{ stats.total_members }}</strong></article>
+  <article><span>Active</span><strong>{{ stats.active_members }}</strong></article>
+  <article><span>Oil Changes Remaining</span><strong>{{ stats.remaining_changes }}</strong></article>
+  <article><span>Services Completed</span><strong>{{ stats.redeemed_changes }}</strong></article>
+  <article><span>Expiring in 30 Days</span><strong>{{ stats.expiring_soon }}</strong></article>
+</section>
+
+<section class="panel">
+  <form class="filters" method="get">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search name, email, phone or member ID">
+    <select name="status">
+      <option value="">All statuses</option>
+      {% for value in ['active','completed','expired','cancelled'] %}
+      <option value="{{ value }}" {% if status_filter == value %}selected{% endif %}>{{ value|title }}</option>
+      {% endfor %}
+    </select>
+    <button class="button primary">Search</button>
+    {% if q or status_filter %}<a class="button ghost" href="{{ url_for('dashboard') }}">Clear</a>{% endif %}
+  </form>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Member</th><th>Customer</th><th>Contact</th><th>Remaining</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+      {% for member in members %}
+        <tr>
+          <td><strong>{{ member.member_id }}</strong></td>
+          <td>{{ member.name }}</td>
+          <td><div>{{ member.email }}</div><small>{{ member.phone }}</small></td>
+          <td><strong>{{ member.remaining_changes }}/{{ member.total_changes }}</strong></td>
+          <td>{{ member.expiration_date.strftime('%b %d, %Y') }}</td>
+          <td><span class="badge {{ member.status }}">{{ member.status }}</span></td>
+          <td><a href="{{ url_for('member_detail', member_id=member.member_id) }}">Open →</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7" class="empty">No members found.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">LATEST ACTIVITY</p><h2>Recent Services</h2></div><a href="{{ url_for('history') }}">View all →</a></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Member</th><th>Customer</th><th>Vehicle</th><th>Mileage</th></tr></thead>
+      <tbody>
+      {% for item in recent_redemptions %}
+      <tr>
+        <td>{{ item.redeemed_at.strftime('%b %d, %Y %I:%M %p') }}</td>
+        <td><a href="{{ url_for('member_detail', member_id=item.member.member_id) }}">{{ item.member.member_id }}</a></td>
+        <td>{{ item.member.name }}</td>
+        <td>{{ item.vehicle or '—' }}</td>
+        <td>{{ item.mileage or '—' }}</td>
+      </tr>
+      {% else %}<tr><td colspan="5" class="empty">No services recorded yet.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

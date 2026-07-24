@@ -1,15 +1,16 @@
+import csv
 import os
 import secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
+from io import BytesIO, StringIO
 
 import qrcode
 import stripe
-from flask import Flask, Response, abort, flash, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, Response, flash, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
-from io import BytesIO, StringIO
-import csv
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -17,12 +18,12 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 database_url = os.environ.get("DATABASE_URL", "sqlite:///oilclub.db")
 if database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
+
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
 db = SQLAlchemy(app)
 
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@carnovaoil.com")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@carnovaoil.com").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")
 
 
@@ -46,7 +47,9 @@ class Member(db.Model):
     stripe_payment_id = db.Column(db.String(255), unique=True)
     token = db.Column(db.String(255), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    redemptions = db.relationship("Redemption", backref="member", lazy=True, cascade="all, delete-orphan")
+    redemptions = db.relationship(
+        "Redemption", backref="member", lazy=True, cascade="all, delete-orphan"
+    )
 
 
 class Redemption(db.Model):
@@ -55,12 +58,48 @@ class Redemption(db.Model):
     redeemed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     note = db.Column(db.Text, default="")
     employee = db.Column(db.String(255), default="Staff")
+    vehicle = db.Column(db.String(255), default="")
+    mileage = db.Column(db.String(30), default="")
+    vin_last8 = db.Column(db.String(20), default="")
+
+
+def add_missing_columns():
+    """Small safe migration for existing Render databases."""
+    inspector = inspect(db.engine)
+    if "redemption" not in inspector.get_table_names():
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("redemption")}
+    dialect = db.engine.dialect.name
+    statements = []
+
+    if "vehicle" not in existing:
+        statements.append("ALTER TABLE redemption ADD COLUMN vehicle VARCHAR(255)")
+    if "mileage" not in existing:
+        statements.append("ALTER TABLE redemption ADD COLUMN mileage VARCHAR(30)")
+    if "vin_last8" not in existing:
+        statements.append("ALTER TABLE redemption ADD COLUMN vin_last8 VARCHAR(20)")
+
+    for statement in statements:
+        try:
+            db.session.execute(text(statement))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
 
 
 def init_db():
     db.create_all()
-    if not Admin.query.filter_by(email=ADMIN_EMAIL).first():
-        db.session.add(Admin(email=ADMIN_EMAIL, password_hash=generate_password_hash(ADMIN_PASSWORD)))
+    add_missing_columns()
+
+    admin = Admin.query.filter(db.func.lower(Admin.email) == ADMIN_EMAIL).first()
+    if not admin:
+        db.session.add(
+            Admin(
+                email=ADMIN_EMAIL,
+                password_hash=generate_password_hash(ADMIN_PASSWORD),
+            )
+        )
         db.session.commit()
 
 
@@ -75,6 +114,7 @@ def login_required(view):
         if not session.get("admin_id"):
             return redirect(url_for("login"))
         return view(*args, **kwargs)
+
     return wrapped
 
 
@@ -94,6 +134,22 @@ def current_member_status(member):
     return "active"
 
 
+def refresh_member_statuses():
+    changed = False
+    for member in Member.query.all():
+        new_status = current_member_status(member)
+        if member.status != new_status:
+            member.status = new_status
+            changed = True
+    if changed:
+        db.session.commit()
+
+
+@app.context_processor
+def shared_template_values():
+    return {"today": date.today(), "current_year": date.today().year}
+
+
 @app.route("/")
 def index():
     return redirect(url_for("dashboard" if session.get("admin_id") else "login"))
@@ -110,12 +166,15 @@ def login():
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
         admin = Admin.query.filter(db.func.lower(Admin.email) == email).first()
+
         if admin and check_password_hash(admin.password_hash, password):
             session.clear()
             session["admin_id"] = admin.id
             session["admin_email"] = admin.email
             return redirect(url_for("dashboard"))
+
         flash("Invalid email or password.", "error")
+
     return render_template("login.html")
 
 
@@ -128,44 +187,81 @@ def logout():
 @app.route("/dashboard")
 @login_required
 def dashboard():
+    refresh_member_statuses()
     q = request.args.get("q", "").strip()
+    status_filter = request.args.get("status", "").strip()
+
     query = Member.query
     if q:
         like = f"%{q}%"
-        query = query.filter(db.or_(
-            Member.member_id.ilike(like),
-            Member.name.ilike(like),
-            Member.email.ilike(like),
-            Member.phone.ilike(like)
-        ))
-    members = query.order_by(Member.created_at.desc()).all()
-    for member in members:
-        member.status = current_member_status(member)
-    db.session.commit()
+        query = query.filter(
+            db.or_(
+                Member.member_id.ilike(like),
+                Member.name.ilike(like),
+                Member.email.ilike(like),
+                Member.phone.ilike(like),
+            )
+        )
+    if status_filter:
+        query = query.filter(Member.status == status_filter)
 
+    members = query.order_by(Member.created_at.desc()).all()
     all_members = Member.query.all()
+    all_redemptions = Redemption.query.count()
+    expiring_cutoff = date.today() + timedelta(days=30)
+
     stats = {
         "total_members": len(all_members),
-        "active_members": sum(1 for m in all_members if current_member_status(m) == "active"),
-        "remaining_changes": sum(m.remaining_changes for m in all_members),
-        "redeemed_changes": sum(m.total_changes - m.remaining_changes for m in all_members),
+        "active_members": sum(
+            1 for member in all_members if current_member_status(member) == "active"
+        ),
+        "remaining_changes": sum(member.remaining_changes for member in all_members),
+        "redeemed_changes": all_redemptions,
+        "expiring_soon": sum(
+            1
+            for member in all_members
+            if current_member_status(member) == "active"
+            and date.today() <= member.expiration_date <= expiring_cutoff
+        ),
     }
-    return render_template("dashboard.html", members=members, stats=stats, q=q)
+
+    recent_redemptions = (
+        Redemption.query.order_by(Redemption.redeemed_at.desc()).limit(8).all()
+    )
+
+    return render_template(
+        "dashboard.html",
+        members=members,
+        stats=stats,
+        q=q,
+        status_filter=status_filter,
+        recent_redemptions=recent_redemptions,
+    )
 
 
 @app.route("/members/new", methods=["GET", "POST"])
 @login_required
 def new_member():
     if request.method == "POST":
-        purchase = date.fromisoformat(request.form.get("purchase_date") or date.today().isoformat())
-        expiration_text = request.form.get("expiration_date")
-        expiration = date.fromisoformat(expiration_text) if expiration_text else purchase + timedelta(days=365)
-        total = int(request.form.get("total_changes", 5))
+        try:
+            purchase = date.fromisoformat(
+                request.form.get("purchase_date") or date.today().isoformat()
+            )
+            expiration_text = request.form.get("expiration_date")
+            expiration = (
+                date.fromisoformat(expiration_text)
+                if expiration_text
+                else purchase + timedelta(days=365)
+            )
+            total = max(1, int(request.form.get("total_changes", 5)))
+        except (ValueError, TypeError):
+            flash("Please verify the dates and number of oil changes.", "error")
+            return render_template("member_form.html")
 
         member = Member(
             member_id=next_member_id(),
             name=request.form["name"].strip(),
-            email=request.form["email"].strip(),
+            email=request.form["email"].strip().lower(),
             phone=request.form.get("phone", "").strip(),
             purchase_date=purchase,
             expiration_date=expiration,
@@ -177,6 +273,7 @@ def new_member():
         db.session.commit()
         flash(f"Member {member.member_id} created.", "success")
         return redirect(url_for("member_detail", member_id=member.member_id))
+
     return render_template("member_form.html")
 
 
@@ -184,24 +281,63 @@ def new_member():
 @login_required
 def member_detail(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
-    redemptions = Redemption.query.filter_by(member_id=member.id).order_by(Redemption.redeemed_at.desc()).all()
-    public_url = request.url_root.rstrip("/") + url_for("member_public", token=member.token)
-    return render_template("member_detail.html", member=member, redemptions=redemptions, public_url=public_url)
+    member.status = current_member_status(member)
+    db.session.commit()
+
+    redemptions = (
+        Redemption.query.filter_by(member_id=member.id)
+        .order_by(Redemption.redeemed_at.desc())
+        .all()
+    )
+    public_url = request.url_root.rstrip("/") + url_for(
+        "member_public", token=member.token
+    )
+    return render_template(
+        "member_detail.html",
+        member=member,
+        redemptions=redemptions,
+        public_url=public_url,
+    )
 
 
 @app.route("/members/<member_id>/edit", methods=["GET", "POST"])
 @login_required
 def edit_member(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
+
     if request.method == "POST":
-        member.name = request.form["name"].strip()
-        member.email = request.form["email"].strip()
-        member.phone = request.form.get("phone", "").strip()
-        member.expiration_date = date.fromisoformat(request.form["expiration_date"])
-        member.status = request.form.get("status", "active")
-        db.session.commit()
+        try:
+            member.name = request.form["name"].strip()
+            member.email = request.form["email"].strip().lower()
+            member.phone = request.form.get("phone", "").strip()
+            member.expiration_date = date.fromisoformat(
+                request.form["expiration_date"]
+            )
+            member.status = request.form.get("status", "active")
+            member.total_changes = max(
+                member.total_changes,
+                int(request.form.get("total_changes", member.total_changes)),
+            )
+            member.remaining_changes = min(
+                member.total_changes,
+                max(
+                    0,
+                    int(
+                        request.form.get(
+                            "remaining_changes", member.remaining_changes
+                        )
+                    ),
+                ),
+            )
+            db.session.commit()
+        except (ValueError, TypeError):
+            db.session.rollback()
+            flash("Please verify the information entered.", "error")
+            return render_template("member_edit.html", member=member)
+
         flash("Member information updated.", "success")
         return redirect(url_for("member_detail", member_id=member.member_id))
+
     return render_template("member_edit.html", member=member)
 
 
@@ -209,6 +345,8 @@ def edit_member(member_id):
 @login_required
 def redeem(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
+    member.status = current_member_status(member)
+
     if member.status != "active":
         flash("This membership is not active.", "error")
     elif member.remaining_changes <= 0:
@@ -218,13 +356,19 @@ def redeem(member_id):
     else:
         member.remaining_changes -= 1
         member.status = current_member_status(member)
-        db.session.add(Redemption(
-            member_id=member.id,
-            note=request.form.get("note", "").strip(),
-            employee=session.get("admin_email", "Staff")
-        ))
+        db.session.add(
+            Redemption(
+                member_id=member.id,
+                note=request.form.get("note", "").strip(),
+                employee=session.get("admin_email", "Staff"),
+                vehicle=request.form.get("vehicle", "").strip(),
+                mileage=request.form.get("mileage", "").strip(),
+                vin_last8=request.form.get("vin_last8", "").strip().upper()[-8:],
+            )
+        )
         db.session.commit()
-        flash("One oil change was redeemed successfully.", "success")
+        flash("Oil change redeemed successfully.", "success")
+
     return redirect(url_for("member_detail", member_id=member.member_id))
 
 
@@ -232,16 +376,47 @@ def redeem(member_id):
 @login_required
 def undo(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
-    last = Redemption.query.filter_by(member_id=member.id).order_by(Redemption.redeemed_at.desc()).first()
+    last = (
+        Redemption.query.filter_by(member_id=member.id)
+        .order_by(Redemption.redeemed_at.desc())
+        .first()
+    )
+
     if last:
         db.session.delete(last)
-        member.remaining_changes = min(member.total_changes, member.remaining_changes + 1)
+        member.remaining_changes = min(
+            member.total_changes, member.remaining_changes + 1
+        )
         member.status = current_member_status(member)
         db.session.commit()
         flash("Last redemption was undone.", "success")
     else:
         flash("No redemption to undo.", "error")
+
     return redirect(url_for("member_detail", member_id=member.member_id))
+
+
+@app.route("/history")
+@login_required
+def history():
+    q = request.args.get("q", "").strip()
+    query = Redemption.query.join(Member)
+
+    if q:
+        like = f"%{q}%"
+        query = query.filter(
+            db.or_(
+                Member.member_id.ilike(like),
+                Member.name.ilike(like),
+                Member.email.ilike(like),
+                Redemption.vehicle.ilike(like),
+                Redemption.vin_last8.ilike(like),
+                Redemption.mileage.ilike(like),
+            )
+        )
+
+    redemptions = query.order_by(Redemption.redeemed_at.desc()).all()
+    return render_template("history.html", redemptions=redemptions, q=q)
 
 
 @app.route("/m/<token>")
@@ -249,20 +424,32 @@ def member_public(token):
     member = Member.query.filter_by(token=token).first_or_404()
     member.status = current_member_status(member)
     db.session.commit()
-    redemptions = Redemption.query.filter_by(member_id=member.id).order_by(Redemption.redeemed_at.desc()).all()
-    return render_template("member_public.html", member=member, redemptions=redemptions)
+    redemptions = (
+        Redemption.query.filter_by(member_id=member.id)
+        .order_by(Redemption.redeemed_at.desc())
+        .all()
+    )
+    return render_template(
+        "member_public.html", member=member, redemptions=redemptions
+    )
 
 
 @app.route("/members/<member_id>/qr")
 @login_required
 def member_qr(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
-    public_url = request.url_root.rstrip("/") + url_for("member_public", token=member.token)
+    public_url = request.url_root.rstrip("/") + url_for(
+        "member_public", token=member.token
+    )
     image = qrcode.make(public_url)
     stream = BytesIO()
     image.save(stream, format="PNG")
     stream.seek(0)
-    return send_file(stream, mimetype="image/png", download_name=f"{member.member_id}-qr.png")
+    return send_file(
+        stream,
+        mimetype="image/png",
+        download_name=f"{member.member_id}-qr.png",
+    )
 
 
 @app.route("/export/members.csv")
@@ -270,10 +457,87 @@ def member_qr(member_id):
 def export_members():
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Member ID","Name","Email","Phone","Purchase Date","Expiration Date","Total","Remaining","Status"])
+    writer.writerow(
+        [
+            "Member ID",
+            "Name",
+            "Email",
+            "Phone",
+            "Purchase Date",
+            "Expiration Date",
+            "Total",
+            "Remaining",
+            "Status",
+        ]
+    )
+
     for member in Member.query.order_by(Member.created_at.desc()).all():
-        writer.writerow([member.member_id, member.name, member.email, member.phone, member.purchase_date, member.expiration_date, member.total_changes, member.remaining_changes, current_member_status(member)])
-    return Response(output.getvalue(), mimetype="text/csv", headers={"Content-Disposition":"attachment; filename=carnova-oil-club-members.csv"})
+        writer.writerow(
+            [
+                member.member_id,
+                member.name,
+                member.email,
+                member.phone,
+                member.purchase_date,
+                member.expiration_date,
+                member.total_changes,
+                member.remaining_changes,
+                current_member_status(member),
+            ]
+        )
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=carnova-oil-club-members.csv"
+        },
+    )
+
+
+@app.route("/export/history.csv")
+@login_required
+def export_history():
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "Service Date",
+            "Member ID",
+            "Customer",
+            "Email",
+            "Vehicle",
+            "VIN Last 8",
+            "Mileage",
+            "Employee",
+            "Notes",
+        ]
+    )
+
+    for redemption in Redemption.query.order_by(
+        Redemption.redeemed_at.desc()
+    ).all():
+        writer.writerow(
+            [
+                redemption.redeemed_at.strftime("%Y-%m-%d %H:%M"),
+                redemption.member.member_id,
+                redemption.member.name,
+                redemption.member.email,
+                redemption.vehicle or "",
+                redemption.vin_last8 or "",
+                redemption.mileage or "",
+                redemption.employee or "",
+                redemption.note or "",
+            ]
+        )
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=carnova-oil-club-history.csv"
+        },
+    )
 
 
 @app.route("/stripe/webhook", methods=["POST"])
@@ -286,7 +550,7 @@ def stripe_webhook():
         event = stripe.Webhook.construct_event(
             request.data,
             request.headers.get("Stripe-Signature", ""),
-            webhook_secret
+            webhook_secret,
         )
     except Exception:
         return "Invalid webhook", 400
@@ -297,11 +561,15 @@ def stripe_webhook():
         email = details.get("email") or obj.get("customer_email")
         payment_id = obj.get("payment_intent") or obj.get("id")
 
-        if email and not Member.query.filter_by(stripe_payment_id=payment_id).first():
+        if email and not Member.query.filter_by(
+            stripe_payment_id=payment_id
+        ).first():
             member = Member(
                 member_id=next_member_id(),
-                name=details.get("name") or obj.get("customer_name") or "Stripe Customer",
-                email=email,
+                name=details.get("name")
+                or obj.get("customer_name")
+                or "Stripe Customer",
+                email=email.strip().lower(),
                 phone=details.get("phone") or "",
                 purchase_date=date.today(),
                 expiration_date=date.today() + timedelta(days=365),

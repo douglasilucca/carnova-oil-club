@@ -1,4 +1,16 @@
-{% extends "base.html" %}{% block content %}<form class="card form" method="post"><h1>Create Member</h1><label>Customer name<input name="name" required></label>
-<label>Email<input type="email" name="email" required></label><label>Phone<input name="phone"></label><label>Purchase date<input type="date" name="purchase_date"></label>
-<label>Expiration date<input type="date" name="expiration_date"></label><label>Total oil changes<select name="total_changes"><option selected>5</option><option>3</option><option>10</option></select></label>
-<button class="button primary">Create Membership</button></form>{% endblock %}
+{% extends "base.html" %}
+{% block title %}New Member | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="page-heading"><div><a class="back" href="{{ url_for('dashboard') }}">← Dashboard</a><h1>New Member</h1></div></div>
+<section class="panel form-panel">
+<form method="post" class="form-grid">
+  <label>Full name<input name="name" required autofocus></label>
+  <label>Email<input type="email" name="email" required></label>
+  <label>Phone<input name="phone"></label>
+  <label>Purchase date<input type="date" name="purchase_date" value="{{ today.isoformat() }}" required></label>
+  <label>Expiration date<input type="date" name="expiration_date"></label>
+  <label>Total oil changes<input type="number" min="1" max="20" name="total_changes" value="5" required></label>
+  <div class="wide actions"><button class="button primary" type="submit">Create Member</button><a class="button ghost" href="{{ url_for('dashboard') }}">Cancel</a></div>
+</form>
+</section>
+{% endblock %}

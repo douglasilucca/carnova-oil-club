@@ -1,3 +1,14 @@
-{% extends "base.html" %}{% block content %}<section class="login"><form class="card" method="post"><h1>Carnova Oil Club</h1>
-<p class="muted">Staff access</p><label>Email<input type="email" name="email" required></label><label>Password<input type="password" name="password" required></label>
-<button class="button primary full">Sign In</button></form></section>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Admin Login | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="login-card">
+  <div class="brand-mark large">C</div>
+  <h1>Carnova Oil Club</h1>
+  <p class="muted">Administrative portal</p>
+  <form method="post" class="stack">
+    <label>Email<input type="email" name="email" required autofocus></label>
+    <label>Password<input type="password" name="password" required></label>
+    <button class="button primary" type="submit">Sign In</button>
+  </form>
+</section>
+{% endblock %}
