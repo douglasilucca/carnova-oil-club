@@ -4,6 +4,7 @@
 <div class="page-heading">
   <div><a class="back" href="{{ url_for('dashboard') }}">← Dashboard</a><h1>{{ member.name }}</h1><p class="muted">{{ member.member_id }}</p></div>
   <div class="actions">
+    <a class="button primary" href="{{ url_for('new_vehicle', member_id=member.member_id) }}">+ Add Vehicle</a>
     <a class="button secondary" href="{{ url_for('member_qr', member_id=member.member_id) }}">Download QR</a>
     <a class="button secondary" href="{{ url_for('edit_member', member_id=member.member_id) }}">Edit Member</a>
   </div>
@@ -31,12 +32,59 @@
   </article>
 </section>
 
+<section class="panel">
+  <div class="panel-heading">
+    <div><p class="eyebrow">CUSTOMER GARAGE</p><h2>Vehicles</h2></div>
+    <a class="button primary" href="{{ url_for('new_vehicle', member_id=member.member_id) }}">+ Add Vehicle</a>
+  </div>
+
+  <div class="vehicle-grid">
+  {% for vehicle in vehicles %}
+    <article class="vehicle-card">
+      <div class="vehicle-icon">🚗</div>
+      <div class="vehicle-main">
+        <h3>{{ vehicle.display_name }}</h3>
+        <p>{{ vehicle.color or 'Color not entered' }}{% if vehicle.plate %} · Plate {{ vehicle.plate }}{% endif %}</p>
+        <div class="vehicle-data">
+          <span><small>VIN</small><strong>{{ vehicle.vin or '—' }}</strong></span>
+          <span><small>Mileage</small><strong>{{ vehicle.current_mileage or '—' }}</strong></span>
+        </div>
+        {% if vehicle.notes %}<p class="vehicle-notes">{{ vehicle.notes }}</p>{% endif %}
+      </div>
+      <div class="vehicle-actions">
+        <a href="{{ url_for('edit_vehicle', member_id=member.member_id, vehicle_id=vehicle.id) }}">Edit</a>
+        <form method="post" action="{{ url_for('delete_vehicle', member_id=member.member_id, vehicle_id=vehicle.id) }}" onsubmit="return confirm('Remove this vehicle?')">
+          <button class="link-danger" type="submit">Delete</button>
+        </form>
+      </div>
+    </article>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-icon">🚙</div>
+      <h3>No vehicles registered</h3>
+      <p>Add the customer's vehicle before recording the next service.</p>
+      <a class="button primary" href="{{ url_for('new_vehicle', member_id=member.member_id) }}">Add First Vehicle</a>
+    </div>
+  {% endfor %}
+  </div>
+</section>
+
 <section class="panel redeem-panel">
-  <div><p class="eyebrow">SERVICE CHECK-IN</p><h2>Redeem an Oil Change</h2><p class="muted">Record vehicle and mileage for a complete service history.</p></div>
+  <div><p class="eyebrow">SERVICE CHECK-IN</p><h2>Redeem an Oil Change</h2><p class="muted">Select a registered vehicle or enter one manually.</p></div>
   <form method="post" action="{{ url_for('redeem', member_id=member.member_id) }}" class="redeem-form">
-    <label>Vehicle<input name="vehicle" placeholder="Example: 2020 Toyota RAV4" required></label>
-    <label>VIN last 8<input name="vin_last8" maxlength="8" placeholder="12345678"></label>
-    <label>Mileage<input name="mileage" placeholder="65,240" required></label>
+    {% if vehicles %}
+    <label class="wide">Registered vehicle
+      <select name="vehicle_id" id="vehicle-select">
+        <option value="">Enter vehicle manually</option>
+        {% for vehicle in vehicles %}
+        <option value="{{ vehicle.id }}" data-vin="{{ vehicle.vin[-8:] if vehicle.vin else '' }}" data-mileage="{{ vehicle.current_mileage }}">{{ vehicle.display_name }}{% if vehicle.plate %} · {{ vehicle.plate }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% endif %}
+    <label>Vehicle<input id="vehicle-manual" name="vehicle" placeholder="Example: 2020 Toyota RAV4" {% if not vehicles %}required{% endif %}></label>
+    <label>VIN last 8<input id="vin-last8" name="vin_last8" maxlength="8" placeholder="12345678"></label>
+    <label>Mileage<input id="service-mileage" name="mileage" placeholder="65,240" required></label>
     <label class="wide">Service notes<textarea name="note" rows="3" placeholder="Oil type, filter, observations..."></textarea></label>
     <button class="button primary wide" type="submit" {% if member.status != 'active' %}disabled{% endif %}>Redeem One Oil Change</button>
   </form>
@@ -58,7 +106,7 @@
       {% for item in redemptions %}
       <tr>
         <td>{{ item.redeemed_at.strftime('%b %d, %Y %I:%M %p') }}</td>
-        <td>{{ item.vehicle or '—' }}</td>
+        <td>{{ item.linked_vehicle.display_name if item.linked_vehicle else (item.vehicle or '—') }}</td>
         <td>{{ item.vin_last8 or '—' }}</td>
         <td>{{ item.mileage or '—' }}</td>
         <td>{{ item.employee }}</td>
@@ -69,4 +117,27 @@
     </table>
   </div>
 </section>
+
+<script>
+const vehicleSelect = document.getElementById("vehicle-select");
+if (vehicleSelect) {
+  vehicleSelect.addEventListener("change", function () {
+    const option = this.options[this.selectedIndex];
+    const manual = document.getElementById("vehicle-manual");
+    const vin = document.getElementById("vin-last8");
+    const mileage = document.getElementById("service-mileage");
+    if (this.value) {
+      manual.value = option.text.split(" · ")[0];
+      vin.value = option.dataset.vin || "";
+      mileage.value = option.dataset.mileage || "";
+      manual.readOnly = true;
+    } else {
+      manual.value = "";
+      vin.value = "";
+      mileage.value = "";
+      manual.readOnly = false;
+    }
+  });
+}
+</script>
 {% endblock %}

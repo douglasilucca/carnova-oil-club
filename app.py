@@ -53,15 +53,40 @@ class Member(db.Model):
     )
 
 
+
+class Vehicle(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False)
+    year = db.Column(db.String(4), default="")
+    make = db.Column(db.String(100), nullable=False)
+    model = db.Column(db.String(100), nullable=False)
+    trim = db.Column(db.String(100), default="")
+    vin = db.Column(db.String(17), default="")
+    plate = db.Column(db.String(30), default="")
+    color = db.Column(db.String(50), default="")
+    current_mileage = db.Column(db.String(30), default="")
+    notes = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    member = db.relationship("Member", backref=db.backref("vehicles", lazy=True, cascade="all, delete-orphan"))
+
+    @property
+    def display_name(self):
+        parts = [self.year, self.make, self.model, self.trim]
+        return " ".join(part for part in parts if part).strip()
+
+
 class Redemption(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False)
+    vehicle_id = db.Column(db.Integer, db.ForeignKey("vehicle.id"), nullable=True)
     redeemed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     note = db.Column(db.Text, default="")
     employee = db.Column(db.String(255), default="Staff")
     vehicle = db.Column(db.String(255), default="")
     mileage = db.Column(db.String(30), default="")
     vin_last8 = db.Column(db.String(20), default="")
+    linked_vehicle = db.relationship("Vehicle", foreign_keys=[vehicle_id])
 
 
 def add_missing_columns():
@@ -94,6 +119,8 @@ def add_missing_columns():
         statements.append("ALTER TABLE redemption ADD COLUMN mileage VARCHAR(30)")
     if "vin_last8" not in existing:
         statements.append("ALTER TABLE redemption ADD COLUMN vin_last8 VARCHAR(20)")
+    if "vehicle_id" not in existing:
+        statements.append("ALTER TABLE redemption ADD COLUMN vehicle_id INTEGER")
 
     for statement in statements:
         try:
@@ -314,9 +341,11 @@ def member_detail(member_id):
     public_url = request.url_root.rstrip("/") + url_for(
         "member_public", token=member.token
     )
+    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
     return render_template(
         "member_detail.html",
         member=member,
+        vehicles=vehicles,
         redemptions=redemptions,
         public_url=public_url,
     )
@@ -378,14 +407,30 @@ def redeem(member_id):
     else:
         member.remaining_changes -= 1
         member.status = current_member_status(member)
+        selected_vehicle = None
+        vehicle_id = request.form.get("vehicle_id", "").strip()
+        if vehicle_id.isdigit():
+            selected_vehicle = Vehicle.query.filter_by(id=int(vehicle_id), member_id=member.id).first()
+
+        vehicle_text = request.form.get("vehicle", "").strip()
+        vin_last8 = request.form.get("vin_last8", "").strip().upper()[-8:]
+        mileage = request.form.get("mileage", "").strip()
+
+        if selected_vehicle:
+            vehicle_text = selected_vehicle.display_name
+            vin_last8 = (selected_vehicle.vin or "")[-8:].upper()
+            if mileage:
+                selected_vehicle.current_mileage = mileage
+
         db.session.add(
             Redemption(
                 member_id=member.id,
+                vehicle_id=selected_vehicle.id if selected_vehicle else None,
                 note=request.form.get("note", "").strip(),
                 employee=session.get("admin_email", "Staff"),
-                vehicle=request.form.get("vehicle", "").strip(),
-                mileage=request.form.get("mileage", "").strip(),
-                vin_last8=request.form.get("vin_last8", "").strip().upper()[-8:],
+                vehicle=vehicle_text,
+                mileage=mileage,
+                vin_last8=vin_last8,
             )
         )
         db.session.commit()
@@ -414,6 +459,82 @@ def undo(member_id):
         flash("Last redemption was undone.", "success")
     else:
         flash("No redemption to undo.", "error")
+
+    return redirect(url_for("member_detail", member_id=member.member_id))
+
+
+@app.route("/members/<member_id>/vehicles/new", methods=["GET", "POST"])
+@login_required
+def new_vehicle(member_id):
+    member = Member.query.filter_by(member_id=member_id).first_or_404()
+
+    if request.method == "POST":
+        vin = request.form.get("vin", "").strip().upper()
+        if vin and len(vin) != 17:
+            flash("VIN must contain exactly 17 characters.", "error")
+            return render_template("vehicle_form.html", member=member, vehicle=None)
+
+        vehicle = Vehicle(
+            member_id=member.id,
+            year=request.form.get("year", "").strip(),
+            make=request.form.get("make", "").strip(),
+            model=request.form.get("model", "").strip(),
+            trim=request.form.get("trim", "").strip(),
+            vin=vin,
+            plate=request.form.get("plate", "").strip().upper(),
+            color=request.form.get("color", "").strip(),
+            current_mileage=request.form.get("current_mileage", "").strip(),
+            notes=request.form.get("notes", "").strip(),
+        )
+        db.session.add(vehicle)
+        db.session.commit()
+        flash(f"{vehicle.display_name} added to {member.name}.", "success")
+        return redirect(url_for("member_detail", member_id=member.member_id))
+
+    return render_template("vehicle_form.html", member=member, vehicle=None)
+
+
+@app.route("/members/<member_id>/vehicles/<int:vehicle_id>/edit", methods=["GET", "POST"])
+@login_required
+def edit_vehicle(member_id, vehicle_id):
+    member = Member.query.filter_by(member_id=member_id).first_or_404()
+    vehicle = Vehicle.query.filter_by(id=vehicle_id, member_id=member.id).first_or_404()
+
+    if request.method == "POST":
+        vin = request.form.get("vin", "").strip().upper()
+        if vin and len(vin) != 17:
+            flash("VIN must contain exactly 17 characters.", "error")
+            return render_template("vehicle_form.html", member=member, vehicle=vehicle)
+
+        vehicle.year = request.form.get("year", "").strip()
+        vehicle.make = request.form.get("make", "").strip()
+        vehicle.model = request.form.get("model", "").strip()
+        vehicle.trim = request.form.get("trim", "").strip()
+        vehicle.vin = vin
+        vehicle.plate = request.form.get("plate", "").strip().upper()
+        vehicle.color = request.form.get("color", "").strip()
+        vehicle.current_mileage = request.form.get("current_mileage", "").strip()
+        vehicle.notes = request.form.get("notes", "").strip()
+        db.session.commit()
+        flash("Vehicle information updated.", "success")
+        return redirect(url_for("member_detail", member_id=member.member_id))
+
+    return render_template("vehicle_form.html", member=member, vehicle=vehicle)
+
+
+@app.route("/members/<member_id>/vehicles/<int:vehicle_id>/delete", methods=["POST"])
+@login_required
+def delete_vehicle(member_id, vehicle_id):
+    member = Member.query.filter_by(member_id=member_id).first_or_404()
+    vehicle = Vehicle.query.filter_by(id=vehicle_id, member_id=member.id).first_or_404()
+
+    linked_services = Redemption.query.filter_by(vehicle_id=vehicle.id).count()
+    if linked_services:
+        flash("This vehicle cannot be deleted because it already has service history.", "error")
+    else:
+        db.session.delete(vehicle)
+        db.session.commit()
+        flash("Vehicle removed.", "success")
 
     return redirect(url_for("member_detail", member_id=member.member_id))
 
@@ -457,8 +578,9 @@ def member_public(token):
         .order_by(Redemption.redeemed_at.desc())
         .all()
     )
+    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
     return render_template(
-        "member_public.html", member=member, redemptions=redemptions
+        "member_public.html", member=member, vehicles=vehicles, redemptions=redemptions
     )
 
 

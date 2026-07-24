@@ -12,6 +12,19 @@
     <div class="card-meta"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
   </article>
 
+  {% if vehicles %}
+  <section class="panel">
+    <p class="eyebrow">MY GARAGE</p>
+    <h2>Registered Vehicles</h2>
+    {% for vehicle in vehicles %}
+    <div class="public-history">
+      <strong>{{ vehicle.display_name }}</strong>
+      <span>{% if vehicle.plate %}Plate {{ vehicle.plate }}{% endif %}{% if vehicle.current_mileage %} · {{ vehicle.current_mileage }} miles{% endif %}</span>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
   <section class="panel">
     <h2>Service History</h2>
     {% for item in redemptions %}

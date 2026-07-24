@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit Vehicle' if vehicle else 'Add Vehicle' }} | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <a class="back" href="{{ url_for('member_detail', member_id=member.member_id) }}">← {{ member.name }}</a>
+    <p class="eyebrow">CUSTOMER GARAGE</p>
+    <h1>{{ 'Edit Vehicle' if vehicle else 'Add Vehicle' }}</h1>
+  </div>
+</div>
+
+<section class="panel form-panel">
+  <form method="post" class="form-grid">
+    <label>Year<input name="year" maxlength="4" inputmode="numeric" value="{{ vehicle.year if vehicle else '' }}" placeholder="2023"></label>
+    <label>Make<input name="make" value="{{ vehicle.make if vehicle else '' }}" placeholder="Toyota" required></label>
+    <label>Model<input name="model" value="{{ vehicle.model if vehicle else '' }}" placeholder="RAV4" required></label>
+    <label>Trim<input name="trim" value="{{ vehicle.trim if vehicle else '' }}" placeholder="XLE AWD"></label>
+    <label class="wide">VIN (17 characters)<input name="vin" maxlength="17" minlength="17" value="{{ vehicle.vin if vehicle else '' }}" placeholder="1HGBH41JXMN109186"></label>
+    <label>License plate<input name="plate" value="{{ vehicle.plate if vehicle else '' }}" placeholder="1ABC23"></label>
+    <label>Color<input name="color" value="{{ vehicle.color if vehicle else '' }}" placeholder="Black"></label>
+    <label>Current mileage<input name="current_mileage" value="{{ vehicle.current_mileage if vehicle else '' }}" placeholder="65,240"></label>
+    <label class="wide">Notes<textarea name="notes" rows="4" placeholder="Customer preferences, engine, oil specification...">{{ vehicle.notes if vehicle else '' }}</textarea></label>
+    <div class="wide actions">
+      <button class="button primary" type="submit">{{ 'Save Vehicle' if vehicle else 'Add Vehicle' }}</button>
+      <a class="button ghost" href="{{ url_for('member_detail', member_id=member.member_id) }}">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}
