@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Schedule Service | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="public-wrap booking-page">
+  <div class="booking-heading">
+    <span class="card-wordmark">CAR<span>NOVA</span><small>Southborough</small></span>
+    <p class="eyebrow gold">OIL CLUB SERVICE</p>
+    <h1>Schedule Your Oil Change</h1>
+    <p>Choose an available date and time for {{ member.name }}.</p>
+  </div>
+
+  <section class="panel">
+    <form method="get" class="booking-date-form">
+      <label>Select a date
+        <input type="date" name="appointment_date" min="{{ today.isoformat() }}" max="{{ max_date.isoformat() }}" value="{{ selected_date.isoformat() if selected_date else '' }}" required>
+      </label>
+      <button class="button primary">View Available Times</button>
+    </form>
+  </section>
+
+  {% if selected_date %}
+  <section class="panel">
+    <p class="eyebrow">AVAILABLE TIMES</p>
+    <h2>{{ selected_date.strftime('%A, %B %d, %Y') }}</h2>
+
+    {% if available_slots %}
+    <form method="post" class="stack">
+      <input type="hidden" name="appointment_date" value="{{ selected_date.isoformat() }}">
+      <div class="time-grid">
+        {% for slot in available_slots %}
+        {% set hour = slot[:2]|int %}
+        <label class="time-option">
+          <input type="radio" name="appointment_time" value="{{ slot }}" required>
+          <strong>{{ ((hour - 1) % 12) + 1 }}:{{ slot[3:] }} {{ "AM" if hour < 12 else "PM" }}</strong>
+        </label>
+        {% endfor %}
+      </div>
+
+      <label>Vehicle
+        <select name="vehicle_id">
+          <option value="">Select a vehicle</option>
+          {% for vehicle in vehicles %}
+          <option value="{{ vehicle.id }}">{{ vehicle.display_name }}{% if vehicle.plate %} · {{ vehicle.plate }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>Service
+        <select name="service_type">
+          <option value="Oil Change">Premium Full Synthetic Oil Change</option>
+          <option value="Oil Change and Inspection">Oil Change and Vehicle Inspection</option>
+        </select>
+      </label>
+
+      <label>Notes for the service team
+        <textarea name="customer_notes" rows="4" placeholder="Anything we should know before your visit?"></textarea>
+      </label>
+
+      <button class="button primary large-button">Confirm Appointment</button>
+    </form>
+    {% else %}
+    <div class="empty-state small"><h3>No available times</h3><p>Please choose another business day.</p></div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <a class="back-link" href="{{ url_for('member_public', token=member.token) }}">← Return to digital card</a>
+</section>
+{% endblock %}

@@ -1,7 +1,7 @@
 import csv
 import os
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 from functools import wraps
 from io import BytesIO, StringIO
 
@@ -74,6 +74,27 @@ class Vehicle(db.Model):
     def display_name(self):
         parts = [self.year, self.make, self.model, self.trim]
         return " ".join(part for part in parts if part).strip()
+
+
+
+class Appointment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False)
+    vehicle_id = db.Column(db.Integer, db.ForeignKey("vehicle.id"), nullable=True)
+    appointment_date = db.Column(db.Date, nullable=False)
+    appointment_time = db.Column(db.Time, nullable=False)
+    status = db.Column(db.String(30), nullable=False, default="scheduled")
+    service_type = db.Column(db.String(100), nullable=False, default="Oil Change")
+    customer_notes = db.Column(db.Text, default="")
+    internal_notes = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    member = db.relationship("Member", backref=db.backref("appointments", lazy=True))
+    vehicle = db.relationship("Vehicle", foreign_keys=[vehicle_id])
+
+    @property
+    def starts_at(self):
+        return datetime.combine(self.appointment_date, self.appointment_time)
 
 
 class Redemption(db.Model):
@@ -187,6 +208,78 @@ def refresh_member_statuses():
         db.session.commit()
 
 
+def appointment_slots_for_day(day):
+    if day.weekday() == 6:
+        return []
+
+    start_hour = int(os.environ.get("APPOINTMENT_START_HOUR", "9"))
+    end_hour = int(os.environ.get("APPOINTMENT_END_HOUR", "17"))
+    slot_minutes = int(os.environ.get("APPOINTMENT_SLOT_MINUTES", "60"))
+
+    booked = {
+        appointment.appointment_time.strftime("%H:%M")
+        for appointment in Appointment.query.filter_by(appointment_date=day).filter(
+            Appointment.status.in_(["scheduled", "confirmed"])
+        ).all()
+    }
+
+    slots = []
+    current = datetime.combine(day, time(start_hour, 0))
+    end = datetime.combine(day, time(end_hour, 0))
+
+    while current < end:
+        value = current.strftime("%H:%M")
+        if value not in booked and current > datetime.now():
+            slots.append(value)
+        current += timedelta(minutes=slot_minutes)
+
+    return slots
+
+
+def send_appointment_email(appointment, subject_prefix="Appointment"):
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_user = os.environ.get("SMTP_USERNAME")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM_EMAIL", smtp_user or "")
+    if not all([smtp_host, smtp_user, smtp_password, sender, appointment.member.email]):
+        return False
+
+    import smtplib
+    from email.message import EmailMessage
+
+    message = EmailMessage()
+    message["Subject"] = f"{subject_prefix} — Carnova Oil Club"
+    message["From"] = sender
+    message["To"] = appointment.member.email
+    vehicle_name = appointment.vehicle.display_name if appointment.vehicle else "Vehicle not selected"
+    message.set_content(
+        f"""Hello {appointment.member.name},
+
+Your Carnova Oil Club appointment is scheduled.
+
+Date: {appointment.appointment_date.strftime('%B %d, %Y')}
+Time: {appointment.appointment_time.strftime('%I:%M %p')}
+Service: {appointment.service_type}
+Vehicle: {vehicle_name}
+Status: {appointment.status.title()}
+
+Carnova of Southborough
+251 Turnpike Rd, Southborough, MA 01772
+(978) 258-0029
+"""
+    )
+
+    try:
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        with smtplib.SMTP(smtp_host, port, timeout=15) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(message)
+        return True
+    except Exception:
+        return False
+
+
 @app.context_processor
 def shared_template_values():
     return {"today": date.today(), "current_year": date.today().year}
@@ -274,6 +367,16 @@ def dashboard():
         ),
     }
 
+    upcoming_appointments = (
+        Appointment.query.filter(
+            Appointment.appointment_date >= date.today(),
+            Appointment.status.in_(["scheduled", "confirmed"]),
+        )
+        .order_by(Appointment.appointment_date.asc(), Appointment.appointment_time.asc())
+        .limit(6)
+        .all()
+    )
+
     recent_redemptions = (
         Redemption.query.order_by(Redemption.redeemed_at.desc()).limit(8).all()
     )
@@ -285,6 +388,7 @@ def dashboard():
         q=q,
         status_filter=status_filter,
         recent_redemptions=recent_redemptions,
+        upcoming_appointments=upcoming_appointments,
     )
 
 
@@ -562,6 +666,166 @@ def history():
     return render_template("history.html", redemptions=redemptions, q=q)
 
 
+@app.route("/appointments")
+@login_required
+def appointments():
+    status_filter = request.args.get("status", "").strip()
+    date_filter = request.args.get("date", "").strip()
+
+    query = Appointment.query.join(Member)
+    if status_filter:
+        query = query.filter(Appointment.status == status_filter)
+    if date_filter:
+        try:
+            query = query.filter(Appointment.appointment_date == date.fromisoformat(date_filter))
+        except ValueError:
+            flash("Invalid date filter.", "error")
+
+    appointment_list = query.order_by(
+        Appointment.appointment_date.asc(),
+        Appointment.appointment_time.asc(),
+    ).all()
+
+    return render_template(
+        "appointments.html",
+        appointments=appointment_list,
+        status_filter=status_filter,
+        date_filter=date_filter,
+    )
+
+
+@app.route("/appointments/<int:appointment_id>/status", methods=["POST"])
+@login_required
+def update_appointment_status(appointment_id):
+    appointment = Appointment.query.get_or_404(appointment_id)
+    new_status = request.form.get("status", "").strip()
+
+    if new_status not in {"scheduled", "confirmed", "completed", "cancelled", "no_show"}:
+        flash("Invalid appointment status.", "error")
+        return redirect(url_for("appointments"))
+
+    appointment.status = new_status
+    appointment.internal_notes = request.form.get("internal_notes", appointment.internal_notes or "").strip()
+    db.session.commit()
+
+    if new_status == "confirmed":
+        send_appointment_email(appointment, "Appointment Confirmed")
+    elif new_status == "cancelled":
+        send_appointment_email(appointment, "Appointment Cancelled")
+
+    flash("Appointment updated.", "success")
+    return redirect(request.referrer or url_for("appointments"))
+
+
+@app.route("/m/<token>/appointments/new", methods=["GET", "POST"])
+def public_new_appointment(token):
+    member = Member.query.filter_by(token=token).first_or_404()
+    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
+
+    selected_date_text = request.values.get("appointment_date", "").strip()
+    selected_date = None
+    available_slots = []
+
+    if selected_date_text:
+        try:
+            selected_date = date.fromisoformat(selected_date_text)
+            max_date = date.today() + timedelta(days=int(os.environ.get("APPOINTMENT_BOOKING_DAYS", "30")))
+            if selected_date < date.today() or selected_date > max_date:
+                flash("Please select a date within the available booking window.", "error")
+                selected_date = None
+            elif selected_date.weekday() == 6:
+                flash("The service department is closed on Sundays.", "error")
+            else:
+                available_slots = appointment_slots_for_day(selected_date)
+        except ValueError:
+            flash("Please select a valid date.", "error")
+
+    if request.method == "POST" and request.form.get("appointment_time"):
+        if not selected_date:
+            flash("Please select a valid appointment date.", "error")
+            return redirect(url_for("public_new_appointment", token=member.token))
+
+        appointment_time_text = request.form.get("appointment_time", "").strip()
+        if appointment_time_text not in appointment_slots_for_day(selected_date):
+            flash("That time is no longer available. Please choose another slot.", "error")
+            return redirect(
+                url_for(
+                    "public_new_appointment",
+                    token=member.token,
+                    appointment_date=selected_date.isoformat(),
+                )
+            )
+
+        selected_vehicle = None
+        vehicle_id = request.form.get("vehicle_id", "").strip()
+        if vehicle_id.isdigit():
+            selected_vehicle = Vehicle.query.filter_by(
+                id=int(vehicle_id), member_id=member.id
+            ).first()
+
+        appointment = Appointment(
+            member_id=member.id,
+            vehicle_id=selected_vehicle.id if selected_vehicle else None,
+            appointment_date=selected_date,
+            appointment_time=datetime.strptime(appointment_time_text, "%H:%M").time(),
+            service_type=request.form.get("service_type", "Oil Change").strip() or "Oil Change",
+            customer_notes=request.form.get("customer_notes", "").strip(),
+            status="scheduled",
+        )
+        db.session.add(appointment)
+        db.session.commit()
+        send_appointment_email(appointment, "Appointment Scheduled")
+
+        return redirect(
+            url_for(
+                "appointment_confirmation",
+                token=member.token,
+                appointment_id=appointment.id,
+            )
+        )
+
+    max_date = date.today() + timedelta(days=int(os.environ.get("APPOINTMENT_BOOKING_DAYS", "30")))
+    return render_template(
+        "appointment_public_form.html",
+        member=member,
+        vehicles=vehicles,
+        selected_date=selected_date,
+        available_slots=available_slots,
+        max_date=max_date,
+    )
+
+
+@app.route("/m/<token>/appointments/<int:appointment_id>/confirmation")
+def appointment_confirmation(token, appointment_id):
+    member = Member.query.filter_by(token=token).first_or_404()
+    appointment = Appointment.query.filter_by(
+        id=appointment_id, member_id=member.id
+    ).first_or_404()
+    return render_template(
+        "appointment_confirmation.html",
+        member=member,
+        appointment=appointment,
+    )
+
+
+@app.route("/m/<token>/appointments/<int:appointment_id>/cancel", methods=["POST"])
+def public_cancel_appointment(token, appointment_id):
+    member = Member.query.filter_by(token=token).first_or_404()
+    appointment = Appointment.query.filter_by(
+        id=appointment_id, member_id=member.id
+    ).first_or_404()
+
+    if appointment.status in {"scheduled", "confirmed"} and appointment.starts_at > datetime.now():
+        appointment.status = "cancelled"
+        db.session.commit()
+        send_appointment_email(appointment, "Appointment Cancelled")
+        flash("Your appointment has been cancelled.", "success")
+    else:
+        flash("This appointment can no longer be cancelled online.", "error")
+
+    return redirect(url_for("member_public", token=member.token))
+
+
 @app.route("/scan")
 @login_required
 def scan_qr():
@@ -579,8 +843,21 @@ def member_public(token):
         .all()
     )
     vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
+    upcoming_appointments = (
+        Appointment.query.filter_by(member_id=member.id)
+        .filter(
+            Appointment.appointment_date >= date.today(),
+            Appointment.status.in_(["scheduled", "confirmed"]),
+        )
+        .order_by(Appointment.appointment_date.asc(), Appointment.appointment_time.asc())
+        .all()
+    )
     return render_template(
-        "member_public.html", member=member, vehicles=vehicles, redemptions=redemptions
+        "member_public.html",
+        member=member,
+        vehicles=vehicles,
+        redemptions=redemptions,
+        upcoming_appointments=upcoming_appointments,
     )
 
 

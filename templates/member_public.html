@@ -12,6 +12,34 @@
     <div class="card-meta"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
   </article>
 
+
+  <section class="panel schedule-callout">
+    <div>
+      <p class="eyebrow">SERVICE APPOINTMENTS</p>
+      <h2>Schedule Your Next Oil Change</h2>
+      <p class="muted">Choose an available time online. No phone call required.</p>
+    </div>
+    <a class="button primary" href="{{ url_for('public_new_appointment', token=member.token) }}">Schedule Service</a>
+  </section>
+
+  {% if upcoming_appointments %}
+  <section class="panel">
+    <p class="eyebrow">UPCOMING VISITS</p>
+    <h2>Your Appointments</h2>
+    {% for appointment in upcoming_appointments %}
+    <div class="public-appointment">
+      <div>
+        <strong>{{ appointment.appointment_date.strftime('%B %d, %Y') }} at {{ appointment.appointment_time.strftime('%I:%M %p') }}</strong>
+        <span>{{ appointment.vehicle.display_name if appointment.vehicle else 'Vehicle not selected' }} · {{ appointment.status|title }}</span>
+      </div>
+      <form method="post" action="{{ url_for('public_cancel_appointment', token=member.token, appointment_id=appointment.id) }}" onsubmit="return confirm('Cancel this appointment?')">
+        <button class="link-danger" type="submit">Cancel</button>
+      </form>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
   {% if vehicles %}
   <section class="panel">
     <p class="eyebrow">MY GARAGE</p>

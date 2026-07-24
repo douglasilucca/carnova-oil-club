@@ -81,6 +81,35 @@
   </div>
 </section>
 
+
+<section class="panel">
+  <div class="panel-heading">
+    <div><p class="eyebrow">SERVICE CALENDAR</p><h2>Upcoming Appointments</h2></div>
+    <a href="{{ url_for('appointments') }}">View calendar →</a>
+  </div>
+  <div class="appointment-list compact">
+    {% for appointment in upcoming_appointments %}
+    <article class="appointment-row">
+      <div class="appointment-date">
+        <strong>{{ appointment.appointment_date.strftime('%d') }}</strong>
+        <span>{{ appointment.appointment_date.strftime('%b') }}</span>
+      </div>
+      <div>
+        <h3>{{ appointment.appointment_time.strftime('%I:%M %p') }} · {{ appointment.member.name }}</h3>
+        <p>{{ appointment.vehicle.display_name if appointment.vehicle else 'Vehicle not selected' }} · {{ appointment.service_type }}</p>
+      </div>
+      <span class="badge {{ appointment.status }}">{{ appointment.status }}</span>
+      <a href="{{ url_for('member_detail', member_id=appointment.member.member_id) }}">Open →</a>
+    </article>
+    {% else %}
+    <div class="empty-state small">
+      <h3>No upcoming appointments</h3>
+      <p>Customer bookings will appear here automatically.</p>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
 <section class="panel">
   <div class="panel-heading"><div><p class="eyebrow">LATEST ACTIVITY</p><h2>Recent Services</h2></div><a href="{{ url_for('history') }}">View all →</a></div>
   <div class="table-wrap">
