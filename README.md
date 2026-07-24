@@ -1,18 +1,17 @@
-# Carnova Oil Club V2 Pro
+# Carnova Oil Club V3 — Phase 1
 
-## Included
-- Existing Stripe webhook preserved
-- Existing PostgreSQL members preserved
-- Professional dashboard
-- Member status filtering
-- Service history page
-- Vehicle, last 8 VIN digits, mileage and notes on every redemption
-- Member and service-history CSV exports
-- Customer digital membership card
-- Automatic safe database update for new service-history fields
+## New in this release
+- Premium Carnova visual identity
+- QR camera scanner with manual-search fallback
+- Improved Stripe customer-name capture
+- Optional Stripe Customer lookup using STRIPE_SECRET_KEY
+- Program revenue and estimated outstanding-cost dashboard
+- Membership utilization indicator
+- Premium digital member card
+- Existing members, webhook and PostgreSQL data preserved
 
-## Deploy
-Upload all files and folders to the root of the existing GitHub repository.
-Render Auto-Deploy should deploy the new commit automatically.
+## Optional Render variables
+- STRIPE_SECRET_KEY: allows the webhook to retrieve a customer's name and phone when Stripe does not send them in the checkout event.
+- ESTIMATED_COST_PER_CHANGE_CENTS: internal estimated cost per oil change. Default is 6500 ($65).
 
-Do not delete the PostgreSQL database or Render environment variables.
+Upload the contents of this folder to the root of the existing GitHub repository and commit.

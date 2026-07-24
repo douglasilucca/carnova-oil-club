@@ -10,11 +10,11 @@
   {% if session.get('admin_id') %}
   <header class="topbar">
     <a class="brand" href="{{ url_for('dashboard') }}">
-      <span class="brand-mark">C</span>
-      <span><strong>Carnova</strong><small>Oil Club</small></span>
+      <span class="wordmark"><strong>CAR<span>NOVA</span></strong><small>Southborough · Oil Club</small></span>
     </a>
     <nav>
       <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('scan_qr') }}">Scan QR</a>
       <a href="{{ url_for('history') }}">Service History</a>
       <a href="{{ url_for('new_member') }}">New Member</a>
       <a href="{{ url_for('logout') }}">Logout</a>

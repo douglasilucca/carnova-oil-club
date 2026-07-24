@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Scan QR | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">SERVICE DESK</p><h1>Scan Member QR Code</h1><p class="muted">Use the phone or tablet camera to open the customer card.</p></div>
+</div>
+
+<section class="scanner-layout">
+  <article class="scanner-card">
+    <div class="scanner-frame">
+      <video id="qr-video" playsinline></video>
+      <div class="scan-corners"></div>
+      <div class="scan-line"></div>
+    </div>
+    <p id="scan-status" class="muted">Press “Start Camera” and point it at the member QR code.</p>
+    <div class="actions centered">
+      <button id="start-camera" class="button primary" type="button">Start Camera</button>
+      <button id="stop-camera" class="button secondary" type="button" disabled>Stop</button>
+    </div>
+  </article>
+
+  <article class="panel manual-lookup">
+    <p class="eyebrow">MANUAL BACKUP</p>
+    <h2>Search Without Camera</h2>
+    <p class="muted">Use this when the QR code is damaged or the browser does not support scanning.</p>
+    <form method="get" action="{{ url_for('dashboard') }}" class="stack">
+      <label>Member ID, name, phone or email<input name="q" placeholder="COC-00001"></label>
+      <button class="button dark">Search Member</button>
+    </form>
+  </article>
+</section>
+
+<script>
+const video = document.getElementById("qr-video");
+const startButton = document.getElementById("start-camera");
+const stopButton = document.getElementById("stop-camera");
+const statusText = document.getElementById("scan-status");
+let stream = null;
+let scanning = false;
+let detector = null;
+
+function stopCamera() {
+  scanning = false;
+  if (stream) stream.getTracks().forEach(track => track.stop());
+  stream = null;
+  video.srcObject = null;
+  startButton.disabled = false;
+  stopButton.disabled = true;
+}
+
+async function scanFrame() {
+  if (!scanning || !detector) return;
+  try {
+    const codes = await detector.detect(video);
+    if (codes.length) {
+      const value = codes[0].rawValue;
+      statusText.textContent = "QR code recognized. Opening member...";
+      stopCamera();
+      if (value.startsWith(window.location.origin)) {
+        window.location.href = value;
+      } else {
+        statusText.textContent = "This QR code does not belong to Carnova Oil Club.";
+      }
+      return;
+    }
+  } catch (error) {}
+  requestAnimationFrame(scanFrame);
+}
+
+startButton.addEventListener("click", async () => {
+  if (!("BarcodeDetector" in window)) {
+    statusText.textContent = "QR scanning is not supported in this browser. Use Chrome on Android or the manual search.";
+    return;
+  }
+  try {
+    detector = new BarcodeDetector({formats: ["qr_code"]});
+    stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: "environment"}});
+    video.srcObject = stream;
+    await video.play();
+    scanning = true;
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    statusText.textContent = "Camera active. Hold the QR code inside the frame.";
+    requestAnimationFrame(scanFrame);
+  } catch (error) {
+    statusText.textContent = "Camera permission was denied or no camera is available.";
+  }
+});
+stopButton.addEventListener("click", stopCamera);
+window.addEventListener("beforeunload", stopCamera);
+</script>
+{% endblock %}

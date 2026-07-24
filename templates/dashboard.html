@@ -4,22 +4,51 @@
 <div class="page-heading">
   <div><p class="eyebrow">CARNOVA OF SOUTHBOROUGH</p><h1>Oil Club Dashboard</h1></div>
   <div class="actions">
+    <a class="button dark" href="{{ url_for('scan_qr') }}">▣ Scan QR</a>
     <a class="button secondary" href="{{ url_for('export_members') }}">Export Members</a>
     <a class="button primary" href="{{ url_for('new_member') }}">+ New Member</a>
   </div>
 </div>
 
-<section class="stats">
-  <article><span>Total Members</span><strong>{{ stats.total_members }}</strong></article>
-  <article><span>Active</span><strong>{{ stats.active_members }}</strong></article>
-  <article><span>Oil Changes Remaining</span><strong>{{ stats.remaining_changes }}</strong></article>
-  <article><span>Services Completed</span><strong>{{ stats.redeemed_changes }}</strong></article>
-  <article><span>Expiring in 30 Days</span><strong>{{ stats.expiring_soon }}</strong></article>
+<section class="stats premium-stats">
+  <article><span>Total Members</span><strong>{{ stats.total_members }}</strong><small>all memberships</small></article>
+  <article><span>Active</span><strong>{{ stats.active_members }}</strong><small>currently usable</small></article>
+  <article><span>Remaining Services</span><strong>{{ stats.remaining_changes }}</strong><small>future obligations</small></article>
+  <article><span>Services Completed</span><strong>{{ stats.redeemed_changes }}</strong><small>all time</small></article>
+  <article><span>Program Revenue</span><strong>${{ "{:,.0f}".format(stats.revenue) }}</strong><small>membership sales</small></article>
+</section>
+
+<section class="finance-grid">
+  <article class="finance-card">
+    <p class="eyebrow">PROGRAM FINANCIAL VIEW</p>
+    <h2>Estimated Position</h2>
+    <div class="finance-row"><span>Collected revenue</span><strong>${{ "{:,.2f}".format(stats.revenue) }}</strong></div>
+    <div class="finance-row"><span>Estimated remaining service cost</span><strong>${{ "{:,.2f}".format(stats.outstanding_cost) }}</strong></div>
+    <div class="finance-row total"><span>Estimated program position</span><strong>${{ "{:,.2f}".format(stats.estimated_profit) }}</strong></div>
+    <p class="fineprint">Estimate uses the configured cost per remaining oil change.</p>
+  </article>
+
+  <article class="finance-card">
+    <p class="eyebrow">MEMBERSHIP UTILIZATION</p>
+    <h2>Program Activity</h2>
+    {% set total_capacity = stats.remaining_changes + stats.redeemed_changes %}
+    {% set used_pct = (stats.redeemed_changes / total_capacity * 100) if total_capacity else 0 %}
+    <div class="donut" style="--value: {{ used_pct }};"><div><strong>{{ used_pct|round|int }}%</strong><span>redeemed</span></div></div>
+    <div class="legend"><span><i class="used"></i>Completed {{ stats.redeemed_changes }}</span><span><i></i>Remaining {{ stats.remaining_changes }}</span></div>
+  </article>
+
+  <article class="finance-card alerts-card">
+    <p class="eyebrow">ATTENTION</p>
+    <h2>Membership Alerts</h2>
+    <div class="alert-number">{{ stats.expiring_soon }}</div>
+    <p>memberships expiring within the next 30 days</p>
+    <a href="{{ url_for('dashboard', status='active') }}">Review active members →</a>
+  </article>
 </section>
 
 <section class="panel">
   <form class="filters" method="get">
-    <input type="search" name="q" value="{{ q }}" placeholder="Search name, email, phone or member ID">
+    <input class="search-field" type="search" name="q" value="{{ q }}" placeholder="Search name, email, phone or member ID">
     <select name="status">
       <option value="">All statuses</option>
       {% for value in ['active','completed','expired','cancelled'] %}

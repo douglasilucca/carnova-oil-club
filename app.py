@@ -45,6 +45,7 @@ class Member(db.Model):
     remaining_changes = db.Column(db.Integer, nullable=False, default=5)
     status = db.Column(db.String(30), nullable=False, default="active")
     stripe_payment_id = db.Column(db.String(255), unique=True)
+    price_paid_cents = db.Column(db.Integer, nullable=False, default=22900)
     token = db.Column(db.String(255), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     redemptions = db.relationship(
@@ -66,12 +67,26 @@ class Redemption(db.Model):
 def add_missing_columns():
     """Small safe migration for existing Render databases."""
     inspector = inspect(db.engine)
-    if "redemption" not in inspector.get_table_names():
+    tables = inspector.get_table_names()
+    statements = []
+
+    if "member" in tables:
+        member_columns = {column["name"] for column in inspector.get_columns("member")}
+        if "price_paid_cents" not in member_columns:
+            statements.append(
+                "ALTER TABLE member ADD COLUMN price_paid_cents INTEGER DEFAULT 22900 NOT NULL"
+            )
+
+    if "redemption" not in tables:
+        for statement in statements:
+            try:
+                db.session.execute(text(statement))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
         return
 
     existing = {column["name"] for column in inspector.get_columns("redemption")}
-    dialect = db.engine.dialect.name
-    statements = []
 
     if "vehicle" not in existing:
         statements.append("ALTER TABLE redemption ADD COLUMN vehicle VARCHAR(255)")
@@ -210,6 +225,10 @@ def dashboard():
     all_redemptions = Redemption.query.count()
     expiring_cutoff = date.today() + timedelta(days=30)
 
+    total_revenue_cents = sum((member.price_paid_cents or 0) for member in all_members)
+    estimated_service_cost_cents = stats_cost = int(os.environ.get("ESTIMATED_COST_PER_CHANGE_CENTS", "6500"))
+    outstanding_cost_cents = sum(member.remaining_changes for member in all_members) * estimated_service_cost_cents
+
     stats = {
         "total_members": len(all_members),
         "active_members": sum(
@@ -217,6 +236,9 @@ def dashboard():
         ),
         "remaining_changes": sum(member.remaining_changes for member in all_members),
         "redeemed_changes": all_redemptions,
+        "revenue": total_revenue_cents / 100,
+        "outstanding_cost": outstanding_cost_cents / 100,
+        "estimated_profit": (total_revenue_cents - outstanding_cost_cents) / 100,
         "expiring_soon": sum(
             1
             for member in all_members
@@ -419,6 +441,12 @@ def history():
     return render_template("history.html", redemptions=redemptions, q=q)
 
 
+@app.route("/scan")
+@login_required
+def scan_qr():
+    return render_template("scan.html")
+
+
 @app.route("/m/<token>")
 def member_public(token):
     member = Member.query.filter_by(token=token).first_or_404()
@@ -558,24 +586,42 @@ def stripe_webhook():
     if event["type"] == "checkout.session.completed":
         obj = event["data"]["object"]
         details = obj.get("customer_details") or {}
+        shipping = obj.get("shipping_details") or {}
         email = details.get("email") or obj.get("customer_email")
         payment_id = obj.get("payment_intent") or obj.get("id")
+        customer_name = (
+            details.get("name")
+            or shipping.get("name")
+            or (obj.get("metadata") or {}).get("customer_name")
+            or obj.get("customer_name")
+        )
+        customer_phone = details.get("phone") or shipping.get("phone") or ""
+
+        stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
+        customer_id = obj.get("customer")
+        if stripe_secret and customer_id and (not customer_name or not customer_phone):
+            try:
+                stripe.api_key = stripe_secret
+                customer = stripe.Customer.retrieve(customer_id)
+                customer_name = customer_name or customer.get("name")
+                customer_phone = customer_phone or customer.get("phone") or ""
+            except Exception:
+                pass
 
         if email and not Member.query.filter_by(
             stripe_payment_id=payment_id
         ).first():
             member = Member(
                 member_id=next_member_id(),
-                name=details.get("name")
-                or obj.get("customer_name")
-                or "Stripe Customer",
+                name=customer_name or email.split("@")[0].replace(".", " ").title(),
                 email=email.strip().lower(),
-                phone=details.get("phone") or "",
+                phone=customer_phone,
                 purchase_date=date.today(),
                 expiration_date=date.today() + timedelta(days=365),
                 total_changes=5,
                 remaining_changes=5,
                 stripe_payment_id=payment_id,
+                price_paid_cents=int(obj.get("amount_total") or 22900),
                 token=secrets.token_urlsafe(24),
             )
             db.session.add(member)

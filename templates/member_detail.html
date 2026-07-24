@@ -11,13 +11,13 @@
 
 <section class="member-grid">
   <article class="member-card">
-    <div class="member-card-top"><span class="brand-mark">C</span><span class="badge {{ member.status }}">{{ member.status }}</span></div>
-    <p class="eyebrow">CARNOVA OIL CLUB</p>
+    <div class="member-card-top"><span class="card-wordmark">CAR<span>NOVA</span><small>Southborough</small></span><span class="badge {{ member.status }}">{{ member.status }}</span></div>
+    <p class="eyebrow gold">OIL CLUB PREMIUM</p>
     <h2>{{ member.name }}</h2>
     <div class="remaining-number">{{ member.remaining_changes }}</div>
     <p>premium full synthetic oil changes remaining</p>
     <div class="progress"><span style="width: {{ (member.remaining_changes / member.total_changes * 100) if member.total_changes else 0 }}%"></span></div>
-    <div class="card-meta"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
+    <div class="card-meta three"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Member Since<br><strong>{{ member.purchase_date.strftime('%m/%d/%Y') }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
   </article>
 
   <article class="panel details">
