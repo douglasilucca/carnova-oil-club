@@ -1006,6 +1006,44 @@ def stripe_webhook():
                 customer_phone = customer_phone or customer.get("phone") or ""
             except Exception:
                 pass
+          try:
+    stripe.api_key = stripe_secret
+
+    line_items = stripe.checkout.Session.list_line_items(
+        obj.get("id"),
+        limit=1,
+        expand=["data.price"]
+    )
+
+    price_id = line_items["data"][0]["price"]["id"]
+
+except Exception as error:
+    print("Error retrieving Stripe Price ID:", error)
+    return "Unable to identify membership plan", 400
+
+        plans = {
+            "price_1Tx6veR1GwRFNmYeUO2goMjz": {
+                "name": "Bronze",
+                "changes": 3,
+                "valid_days": 365
+            },
+            "price_1TwiJER1GwRFNmYeeFbUdscR": {
+                "name": "Silver",
+                "changes": 5,
+                "valid_days": 548
+            },
+            "price_1Tx70UR1GwRFNmYePYn1Xrdz": {
+                "name": "Gold",
+                "changes": 8,
+                "valid_days": 730
+            }
+        }
+
+        selected_plan = plans.get(price_id)
+
+        if not selected_plan:
+            print("Unknown Stripe Price ID:", price_id)
+            return "Unknown membership plan", 400
 
         if email and not Member.query.filter_by(
             stripe_payment_id=payment_id
@@ -1016,16 +1054,18 @@ def stripe_webhook():
                 email=email.strip().lower(),
                 phone=customer_phone,
                 purchase_date=date.today(),
-                expiration_date=date.today() + timedelta(days=365),
-                total_changes=5,
-                remaining_changes=5,
+                expiration_date=date.today() + timedelta(
+                    days=selected_plan["valid_days"]
+                ),
+                total_changes=selected_plan["changes"],
+                remaining_changes=selected_plan["changes"],
                 stripe_payment_id=payment_id,
-                price_paid_cents=int(obj.get("amount_total") or 22900),
+                price_paid_cents=int(obj.get("amount_total") or 0),
                 token=secrets.token_urlsafe(24),
             )
+
             db.session.add(member)
             db.session.commit()
-
     return "", 200
 
 
