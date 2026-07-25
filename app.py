@@ -238,7 +238,7 @@ def appointment_slots_for_day(day):
 
 def send_appointment_email(appointment, subject_prefix="Appointment"):
     smtp_host = os.environ.get("SMTP_HOST")
-    smtp_user = os.environ.get("SMTP_USERNAME")
+    smtp_user = os.environ.get("SMTP_USER")
     smtp_password = os.environ.get("SMTP_PASSWORD")
     sender = os.environ.get("SMTP_FROM_EMAIL", smtp_user or "")
     if not all([smtp_host, smtp_user, smtp_password, sender, appointment.member.email]):
@@ -276,9 +276,9 @@ Carnova of Southborough
             server.login(smtp_user, smtp_password)
             server.send_message(message)
         return True
-   except Exception as e:
-    print("EMAIL ERROR:", e)
-    return False
+    except Exception as e:
+        print("EMAIL ERROR:", e)
+        return False
 
 
 @app.context_processor
