@@ -276,8 +276,9 @@ Carnova of Southborough
             server.login(smtp_user, smtp_password)
             server.send_message(message)
         return True
-    except Exception:
-        return False
+   except Exception as e:
+    print("EMAIL ERROR:", e)
+    return False
 
 
 @app.context_processor
