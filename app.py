@@ -970,6 +970,7 @@ def export_history():
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
     webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+
     if not webhook_secret:
         return "Webhook secret not configured", 500
 
@@ -982,92 +983,103 @@ def stripe_webhook():
     except Exception:
         return "Invalid webhook", 400
 
-    if event["type"] == "checkout.session.completed":
-        obj = event["data"]["object"]
-        details = obj.get("customer_details") or {}
-        shipping = obj.get("shipping_details") or {}
-        email = details.get("email") or obj.get("customer_email")
-        payment_id = obj.get("payment_intent") or obj.get("id")
-        customer_name = (
-            details.get("name")
-            or shipping.get("name")
-            or (obj.get("metadata") or {}).get("customer_name")
-            or obj.get("customer_name")
-        )
-        customer_phone = details.get("phone") or shipping.get("phone") or ""
+    if event["type"] != "checkout.session.completed":
+        return "", 200
 
-        stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
-        customer_id = obj.get("customer")
-        if stripe_secret and customer_id and (not customer_name or not customer_phone):
-            try:
-                stripe.api_key = stripe_secret
-                customer = stripe.Customer.retrieve(customer_id)
-                customer_name = customer_name or customer.get("name")
-                customer_phone = customer_phone or customer.get("phone") or ""
-            except Exception:
-                pass
-          try:
-    stripe.api_key = stripe_secret
+    obj = event["data"]["object"]
 
-    line_items = stripe.checkout.Session.list_line_items(
-        obj.get("id"),
-        limit=1,
-        expand=["data.price"]
+    details = obj.get("customer_details") or {}
+    shipping = obj.get("shipping_details") or {}
+
+    email = details.get("email") or obj.get("customer_email")
+    payment_id = obj.get("payment_intent") or obj.get("id")
+
+    customer_name = (
+        details.get("name")
+        or shipping.get("name")
+        or (obj.get("metadata") or {}).get("customer_name")
+        or obj.get("customer_name")
     )
 
-    price_id = line_items["data"][0]["price"]["id"]
+    customer_phone = (
+        details.get("phone")
+        or shipping.get("phone")
+        or ""
+    )
 
-except Exception as error:
-    print("Error retrieving Stripe Price ID:", error)
-    return "Unable to identify membership plan", 400
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
+    customer_id = obj.get("customer")
 
-        plans = {
-            "price_1Tx6veR1GwRFNmYeUO2goMjz": {
-                "name": "Bronze",
-                "changes": 3,
-                "valid_days": 365
-            },
-            "price_1TwiJER1GwRFNmYeeFbUdscR": {
-                "name": "Silver",
-                "changes": 5,
-                "valid_days": 548
-            },
-            "price_1Tx70UR1GwRFNmYePYn1Xrdz": {
-                "name": "Gold",
-                "changes": 8,
-                "valid_days": 730
-            }
-        }
+    if stripe_secret and customer_id and (not customer_name or not customer_phone):
+        try:
+            stripe.api_key = stripe_secret
+            customer = stripe.Customer.retrieve(customer_id)
 
-        selected_plan = plans.get(price_id)
+            customer_name = customer_name or customer.get("name")
+            customer_phone = customer_phone or customer.get("phone") or ""
 
-        if not selected_plan:
-            print("Unknown Stripe Price ID:", price_id)
-            return "Unknown membership plan", 400
+        except Exception as error:
+            print("Error retrieving Stripe customer:", error)
 
-        if email and not Member.query.filter_by(
-            stripe_payment_id=payment_id
-        ).first():
-            member = Member(
-                member_id=next_member_id(),
-                name=customer_name or email.split("@")[0].replace(".", " ").title(),
-                email=email.strip().lower(),
-                phone=customer_phone,
-                purchase_date=date.today(),
-                expiration_date=date.today() + timedelta(
-                    days=selected_plan["valid_days"]
-                ),
-                total_changes=selected_plan["changes"],
-                remaining_changes=selected_plan["changes"],
-                stripe_payment_id=payment_id,
-                price_paid_cents=int(obj.get("amount_total") or 0),
-                token=secrets.token_urlsafe(24),
-            )
+    try:
+        stripe.api_key = stripe_secret
 
-            db.session.add(member)
-            db.session.commit()
+        line_items = stripe.checkout.Session.list_line_items(
+            obj.get("id"),
+            limit=1,
+            expand=["data.price"],
+        )
+
+        price_id = line_items["data"][0]["price"]["id"]
+
+    except Exception as error:
+        print("Error retrieving Stripe Price ID:", error)
+        return "Unable to identify membership plan", 400
+
+    plans = {
+        "price_1Tx6veR1GwRFNmYeUO2goMjz": {
+            "changes": 3,
+            "valid_days": 365,
+        },
+        "price_1TwiJER1GwRFNmYeeFbUdscR": {
+            "changes": 5,
+            "valid_days": 548,
+        },
+        "price_1Tx70UR1GwRFNmYePYn1Xrdz": {
+            "changes": 8,
+            "valid_days": 730,
+        },
+    }
+
+    selected_plan = plans.get(price_id)
+
+    if not selected_plan:
+        print("Unknown Stripe Price ID:", price_id)
+        return "Unknown membership plan", 400
+
+    if email and not Member.query.filter_by(
+        stripe_payment_id=payment_id
+    ).first():
+
+        member = Member(
+            member_id=next_member_id(),
+            name=customer_name or email.split("@")[0].replace(".", " ").title(),
+            email=email.strip().lower(),
+            phone=customer_phone,
+            purchase_date=date.today(),
+            expiration_date=date.today()
+            + timedelta(days=selected_plan["valid_days"]),
+            total_changes=selected_plan["changes"],
+            remaining_changes=selected_plan["changes"],
+            stripe_payment_id=payment_id,
+            price_paid_cents=int(obj.get("amount_total") or 0),
+            token=secrets.token_urlsafe(24),
+        )
+
+        db.session.add(member)
+        db.session.commit()
+
     return "", 200
-
 
 if __name__ == "__main__":
     with app.app_context():
