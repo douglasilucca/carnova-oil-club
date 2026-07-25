@@ -967,6 +967,54 @@ def export_history():
         },
     )
 
+def send_membership_confirmation_email(member):
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM_EMAIL", smtp_user or "")
+
+    if not all([smtp_host, smtp_user, smtp_password, sender, member.email]):
+        print("EMAIL ERROR: Missing SMTP configuration")
+        return False
+
+    import smtplib
+    from email.message import EmailMessage
+
+    message = EmailMessage()
+    message["Subject"] = "Welcome to Carnova Oil Club"
+    message["From"] = sender
+    message["To"] = member.email
+
+    message.set_content(f"""
+Hello {member.name},
+
+Thank you for joining Carnova Oil Club!
+
+Membership ID: {member.member_id}
+Plan: {member.total_changes} Oil Changes
+Remaining Oil Changes: {member.remaining_changes}
+Expiration Date: {member.expiration_date.strftime('%B %d, %Y')}
+
+Thank you for choosing Carnova!
+
+Carnova of Southborough
+251 Turnpike Rd
+Southborough, MA 01772
+Phone: (978) 258-0029
+""")
+
+    try:
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        with smtplib.SMTP(smtp_host, port, timeout=15) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(message)
+        print("MEMBERSHIP EMAIL SENT")
+        return True
+
+    except Exception as e:
+        print("EMAIL ERROR:", e)
+        return False
 
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
@@ -1079,7 +1127,9 @@ def stripe_webhook():
 
         db.session.add(member)
         db.session.commit()
-
+        
+        send_membership_confirmation_email(member)
+   
     return "", 200
 
 if __name__ == "__main__":
