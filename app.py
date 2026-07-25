@@ -1064,8 +1064,9 @@ def stripe_webhook():
             stripe.api_key = stripe_secret
             customer = stripe.Customer.retrieve(customer_id)
 
-            customer_name = customer_name or customer.get("name")
-            customer_phone = customer_phone or customer.get("phone") or ""
+            if not customer_name or customer_name.strip().lower() in ["carnova", "guest", "customer"]:
+                 customer_name = email.split("@")[0].replace(".", " ").replace("_", " ").title()
+              customer_phone = customer_phone or customer.get("phone") or ""
 
         except Exception as error:
             print("Error retrieving Stripe customer:", error)
