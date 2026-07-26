@@ -1067,7 +1067,7 @@ def stripe_webhook():
             customer_name = customer_name or customer.get("name")
             customer_phone = customer_phone or customer.get("phone") or ""
 
-    except Exception as error:
+        except Exception as error:
             print("Error retrieving Stripe customer:", error)
 
     try:
