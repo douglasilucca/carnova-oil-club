@@ -1,10 +1,18 @@
 {% extends "base.html" %}
 {% block title %}{{ member.member_id }} | Carnova Oil Club{% endblock %}
 {% block content %}
+{% set monthly_limit_reached = is_monthly_membership(member) and vehicles|length >= 1 %}
 <div class="page-heading">
   <div><a class="back" href="{{ url_for('dashboard') }}">← Dashboard</a><h1>{{ member.name }}</h1><p class="muted">{{ member.member_id }}</p></div>
   <div class="actions">
+    {% if monthly_limit_reached %}
+    <div>
+      <button class="button primary" type="button" disabled style="background-color:#d1d5db;border-color:#cbd5e1;color:#4b5563;cursor:not-allowed;">Vehicle Limit Reached</button>
+      <p class="muted" style="margin-top:0.35rem;font-size:0.9rem;">Monthly Membership includes one registered vehicle only.</p>
+    </div>
+    {% else %}
     <a class="button primary" href="{{ url_for('new_vehicle', member_id=member.member_id) }}">+ Add Vehicle</a>
+    {% endif %}
     <a class="button secondary" href="{{ url_for('member_qr', member_id=member.member_id) }}">Download QR</a>
     <a class="button secondary" href="{{ url_for('edit_member', member_id=member.member_id) }}">Edit Member</a>
   </div>
@@ -26,6 +34,11 @@
     <dl>
       <div><dt>Email</dt><dd>{{ member.email }}</dd></div>
       <div><dt>Phone</dt><dd>{{ member.phone or '—' }}</dd></div>
+      <div><dt>Plan</dt><dd>{{ member.plan_name or 'Prepaid Package' }}</dd></div>
+      {% if member.stripe_subscription_id %}
+      <div><dt>Subscription status</dt><dd><span class="badge {{ member.status }}">{{ member.subscription_status or member.status }}</span></dd></div>
+      <div><dt>Annual benefits renew</dt><dd>{{ member.benefit_period_end.strftime('%b %d, %Y') if member.benefit_period_end else '—' }}</dd></div>
+      {% endif %}
       <div><dt>Purchase date</dt><dd>{{ member.purchase_date.strftime('%b %d, %Y') }}</dd></div>
       <div><dt>Public card</dt><dd><a href="{{ public_url }}" target="_blank">Open customer card ↗</a></dd></div>
     </dl>
@@ -35,7 +48,14 @@
 <section class="panel">
   <div class="panel-heading">
     <div><p class="eyebrow">CUSTOMER GARAGE</p><h2>Vehicles</h2></div>
+    {% if monthly_limit_reached %}
+    <div>
+      <button class="button primary" type="button" disabled style="background-color:#d1d5db;border-color:#cbd5e1;color:#4b5563;cursor:not-allowed;">Vehicle Limit Reached</button>
+      <p class="muted" style="margin-top:0.35rem;font-size:0.9rem;">Monthly Membership includes one registered vehicle only.</p>
+    </div>
+    {% else %}
     <a class="button primary" href="{{ url_for('new_vehicle', member_id=member.member_id) }}">+ Add Vehicle</a>
+    {% endif %}
   </div>
 
   <div class="vehicle-grid">
@@ -63,7 +83,12 @@
       <div class="empty-icon">🚙</div>
       <h3>No vehicles registered</h3>
       <p>Add the customer's vehicle before recording the next service.</p>
+      {% if monthly_limit_reached %}
+      <button class="button primary" type="button" disabled style="background-color:#d1d5db;border-color:#cbd5e1;color:#4b5563;cursor:not-allowed;">Vehicle Limit Reached</button>
+      <p class="muted" style="margin-top:0.35rem;font-size:0.9rem;">Monthly Membership includes one registered vehicle only.</p>
+      {% else %}
       <a class="button primary" href="{{ url_for('new_vehicle', member_id=member.member_id) }}">Add First Vehicle</a>
+      {% endif %}
     </div>
   {% endfor %}
   </div>

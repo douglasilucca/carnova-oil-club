@@ -47,14 +47,14 @@ def test_monthly_membership_defaults_are_set_for_manual_creation():
 
 
 def test_monthly_membership_rejects_second_vehicle(client):
-    with flask_app.app_context():
-        login_response = client.post(
-            "/login",
-            data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
-            follow_redirects=True,
-        )
-        assert login_response.status_code == 200
+    login_response = client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+    assert login_response.status_code == 200
 
+    with flask_app.app_context():
         member = Member(
             name="Test",
             email="test@example.com",
@@ -73,20 +73,94 @@ def test_monthly_membership_rejects_second_vehicle(client):
         db.session.add(first_vehicle)
         db.session.commit()
 
-        response = client.post(
-            f"/members/{member.member_id}/vehicles/new",
-            data={
-                "make": "Honda",
-                "model": "Civic",
-                "vin": "1HGBH41JXMN109187",
-                "plate": "ABC123",
-            },
-            follow_redirects=True,
-        )
+    with flask_app.app_context():
+        member = Member.query.filter_by(member_id="COC-00002").first()
+        member_id = member.member_id
 
-        assert response.status_code == 200
-        assert b"Monthly Membership allows only one registered vehicle." in response.data
-        assert Vehicle.query.filter_by(member_id=member.id).count() == 1
+    response = client.post(
+        f"/members/{member_id}/vehicles/new",
+        data={
+            "make": "Honda",
+            "model": "Civic",
+            "vin": "1HGBH41JXMN109187",
+            "plate": "ABC123",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Monthly Membership allows only one registered vehicle." in response.data
+    assert Vehicle.query.filter_by(member_id=member.id).count() == 1
+
+
+def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_button(client, monkeypatch):
+    def fake_construct_event(payload, signature, secret):
+        return {"id": "evt_webhook_limit", "type": "checkout.session.completed", "data": {"object": {
+            "id": "cs_webhook_limit",
+            "mode": "subscription",
+            "customer": "cus_webhook_limit",
+            "subscription": "sub_webhook_limit",
+            "payment_intent": "pi_webhook_limit",
+            "customer_details": {"email": "webhook-limit@example.com", "name": "Webhook Limit"},
+            "amount_total": 2000,
+            "metadata": {},
+            "shipping_details": {},
+        }}}
+
+    class FakeLineItems:
+        @staticmethod
+        def list_line_items(session_id, limit=1, expand=None):
+            return {"data": [{"price": {"id": "price_1Txt07R1GwRFNmYeGo3km5vf"}}]}
+
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", fake_construct_event)
+    monkeypatch.setattr("app.stripe.checkout.Session", FakeLineItems)
+
+    webhook_response = client.post(
+        "/stripe/webhook",
+        data=json.dumps({"test": True}),
+        headers={"Stripe-Signature": "test-signature"},
+    )
+    assert webhook_response.status_code == 200
+
+    with flask_app.app_context():
+        member = Member.query.filter_by(email="webhook-limit@example.com").first()
+        assert member is not None
+        assert member.plan_name == "Monthly Membership"
+        assert member.stripe_price_id == "price_1Txt07R1GwRFNmYeGo3km5vf"
+
+    login_response = client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+    assert login_response.status_code == 200
+
+    with flask_app.app_context():
+        member = Member.query.filter_by(email="webhook-limit@example.com").first()
+        first_vehicle = Vehicle(member_id=member.id, make="Toyota", model="Camry", vin="1HGBH41JXMN109186")
+        db.session.add(first_vehicle)
+        db.session.commit()
+        member_id = member.member_id
+
+    first_vehicle_response = client.post(
+        f"/members/{member_id}/vehicles/new",
+        data={
+            "make": "Honda",
+            "model": "Civic",
+            "vin": "1HGBH41JXMN109187",
+            "plate": "ABC123",
+        },
+        follow_redirects=True,
+    )
+    assert first_vehicle_response.status_code == 200
+    assert b"Monthly Membership allows only one registered vehicle." in first_vehicle_response.data
+    assert Vehicle.query.filter_by(member_id=member.id).count() == 1
+
+    member_detail_response = client.get(f"/members/{member_id}")
+    assert member_detail_response.status_code == 200
+    assert b"Vehicle Limit Reached" in member_detail_response.data
+    assert b"Monthly Membership includes one registered vehicle only." in member_detail_response.data
+    assert b"+ Add Vehicle" not in member_detail_response.data
 
 
 def test_current_member_status_blocks_past_due_and_cancelled_members():

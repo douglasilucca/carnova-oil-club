@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import secrets
 from datetime import date, datetime, timedelta, time
 from functools import wraps
@@ -47,6 +48,7 @@ class Member(db.Model):
     stripe_payment_id = db.Column(db.String(255), unique=True)
     stripe_customer_id = db.Column(db.String(255), index=True)
     stripe_subscription_id = db.Column(db.String(255), unique=True, index=True)
+    stripe_price_id = db.Column(db.String(255), index=True)
     plan_name = db.Column(db.String(100), nullable=False, default="Prepaid Package")
     subscription_status = db.Column(db.String(30))
     benefit_period_start = db.Column(db.Date)
@@ -136,6 +138,7 @@ def add_missing_columns():
             "price_paid_cents": "INTEGER DEFAULT 22900 NOT NULL",
             "stripe_customer_id": "VARCHAR(255)",
             "stripe_subscription_id": "VARCHAR(255)",
+            "stripe_price_id": "VARCHAR(255)",
             "plan_name": "VARCHAR(100) DEFAULT 'Prepaid Package' NOT NULL",
             "subscription_status": "VARCHAR(30)",
             "benefit_period_start": "DATE",
@@ -222,6 +225,33 @@ def monthly_membership_defaults(reference_date=None):
         "benefit_period_end": today + timedelta(days=365),
         "expiration_date": today + timedelta(days=365),
     }
+
+
+def normalize_plan_name(value):
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+
+def is_monthly_membership(member):
+    if not member:
+        return False
+
+    normalized_plan = normalize_plan_name(getattr(member, "plan_name", None))
+    if normalized_plan in {"monthly membership", "carnova monthly membership"}:
+        return True
+
+    stripe_price_id = getattr(member, "stripe_price_id", None)
+    if stripe_price_id in MONTHLY_PRICE_IDS:
+        return True
+
+    if getattr(member, "stripe_subscription_id", None):
+        return True
+
+    return False
+
+
+app.jinja_env.globals["is_monthly_membership"] = is_monthly_membership
 
 
 def current_member_status(member):
@@ -641,7 +671,7 @@ def new_vehicle(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
 
     if request.method == "POST":
-        if member.plan_name == "Monthly Membership":
+        if is_monthly_membership(member):
             existing_vehicle_count = Vehicle.query.filter_by(member_id=member.id).count()
             if existing_vehicle_count >= 1:
                 flash("Monthly Membership allows only one registered vehicle.", "error")
@@ -1299,6 +1329,7 @@ def process_checkout_completed(obj):
         existing.stripe_payment_id = payment_id or existing.stripe_payment_id
         existing.stripe_customer_id = customer_id or existing.stripe_customer_id
         existing.stripe_subscription_id = subscription_id or existing.stripe_subscription_id
+        existing.stripe_price_id = price_id or existing.stripe_price_id
         existing.plan_name = selected_plan["name"]
         existing.subscription_status = subscription_status or existing.subscription_status
         existing.name = customer_name or existing.name or (normalized_email or "").split("@")[0].replace(".", " ").title()
@@ -1335,6 +1366,7 @@ def process_checkout_completed(obj):
         stripe_payment_id=payment_id,
         stripe_customer_id=customer_id,
         stripe_subscription_id=subscription_id,
+        stripe_price_id=price_id,
         plan_name=selected_plan["name"],
         subscription_status=subscription_status,
         benefit_period_start=today if selected_plan["subscription"] else None,
