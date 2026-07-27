@@ -45,6 +45,12 @@ class Member(db.Model):
     remaining_changes = db.Column(db.Integer, nullable=False, default=5)
     status = db.Column(db.String(30), nullable=False, default="active")
     stripe_payment_id = db.Column(db.String(255), unique=True)
+    stripe_customer_id = db.Column(db.String(255), index=True)
+    stripe_subscription_id = db.Column(db.String(255), unique=True, index=True)
+    plan_name = db.Column(db.String(100), nullable=False, default="Prepaid Package")
+    subscription_status = db.Column(db.String(30))
+    benefit_period_start = db.Column(db.Date)
+    benefit_period_end = db.Column(db.Date)
     price_paid_cents = db.Column(db.Integer, nullable=False, default=22900)
     token = db.Column(db.String(255), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
@@ -52,6 +58,14 @@ class Member(db.Model):
         "Redemption", backref="member", lazy=True, cascade="all, delete-orphan"
     )
 
+
+
+class StripeEvent(db.Model):
+    """Stores processed Stripe event IDs so webhook retries are idempotent."""
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    event_type = db.Column(db.String(100), nullable=False)
+    processed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 
 class Vehicle(db.Model):
@@ -118,10 +132,20 @@ def add_missing_columns():
 
     if "member" in tables:
         member_columns = {column["name"] for column in inspector.get_columns("member")}
-        if "price_paid_cents" not in member_columns:
-            statements.append(
-                "ALTER TABLE member ADD COLUMN price_paid_cents INTEGER DEFAULT 22900 NOT NULL"
-            )
+        member_column_definitions = {
+            "price_paid_cents": "INTEGER DEFAULT 22900 NOT NULL",
+            "stripe_customer_id": "VARCHAR(255)",
+            "stripe_subscription_id": "VARCHAR(255)",
+            "plan_name": "VARCHAR(100) DEFAULT 'Prepaid Package' NOT NULL",
+            "subscription_status": "VARCHAR(30)",
+            "benefit_period_start": "DATE",
+            "benefit_period_end": "DATE",
+        }
+        for column_name, definition in member_column_definitions.items():
+            if column_name not in member_columns:
+                statements.append(
+                    f"ALTER TABLE member ADD COLUMN {column_name} {definition}"
+                )
 
     if "redemption" not in tables:
         for statement in statements:
@@ -187,7 +211,27 @@ def next_member_id():
     return f"COC-{number:05d}"
 
 
+def monthly_membership_defaults(reference_date=None):
+    today = reference_date or date.today()
+    return {
+        "plan_name": "Monthly Membership",
+        "total_changes": 3,
+        "remaining_changes": 3,
+        "subscription_status": "active",
+        "benefit_period_start": today,
+        "benefit_period_end": today + timedelta(days=365),
+        "expiration_date": today + timedelta(days=365),
+    }
+
+
 def current_member_status(member):
+    # Subscription payment state takes priority over ordinary package status.
+    if member.stripe_subscription_id:
+        if member.subscription_status in {"past_due", "unpaid", "incomplete", "incomplete_expired", "paused"}:
+            return "past_due"
+        if member.subscription_status in {"canceled", "cancelled"}:
+            return "cancelled"
+
     if member.status == "cancelled":
         return "cancelled"
     if member.expiration_date < date.today():
@@ -402,12 +446,28 @@ def new_member():
                 request.form.get("purchase_date") or date.today().isoformat()
             )
             expiration_text = request.form.get("expiration_date")
-            expiration = (
-                date.fromisoformat(expiration_text)
-                if expiration_text
-                else purchase + timedelta(days=365)
-            )
-            total = max(1, int(request.form.get("total_changes", 5)))
+            membership_plan = request.form.get("membership_plan", "").strip()
+            today = date.today()
+
+            if membership_plan == "monthly_membership":
+                defaults = monthly_membership_defaults(today)
+                expiration = defaults["expiration_date"]
+                total = defaults["total_changes"]
+                plan_name = defaults["plan_name"]
+                subscription_status = defaults["subscription_status"]
+                benefit_period_start = defaults["benefit_period_start"]
+                benefit_period_end = defaults["benefit_period_end"]
+            else:
+                expiration = (
+                    date.fromisoformat(expiration_text)
+                    if expiration_text
+                    else purchase + timedelta(days=365)
+                )
+                total = max(1, int(request.form.get("total_changes", 5)))
+                plan_name = "Prepaid Package"
+                subscription_status = None
+                benefit_period_start = None
+                benefit_period_end = None
         except (ValueError, TypeError):
             flash("Please verify the dates and number of oil changes.", "error")
             return render_template("member_form.html")
@@ -421,6 +481,11 @@ def new_member():
             expiration_date=expiration,
             total_changes=total,
             remaining_changes=total,
+            status="active",
+            plan_name=plan_name,
+            subscription_status=subscription_status,
+            benefit_period_start=benefit_period_start,
+            benefit_period_end=benefit_period_end,
             token=secrets.token_urlsafe(24),
         )
         db.session.add(member)
@@ -505,6 +570,8 @@ def redeem(member_id):
 
     if member.status != "active":
         flash("This membership is not active.", "error")
+    elif member.plan_name == "Monthly Membership" and not Vehicle.query.filter_by(member_id=member.id).first():
+        flash("This monthly membership requires at least one registered vehicle before redeeming an oil change.", "error")
     elif member.remaining_changes <= 0:
         flash("No oil changes remain.", "error")
     elif member.expiration_date < date.today():
@@ -574,6 +641,12 @@ def new_vehicle(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
 
     if request.method == "POST":
+        if member.plan_name == "Monthly Membership":
+            existing_vehicle_count = Vehicle.query.filter_by(member_id=member.id).count()
+            if existing_vehicle_count >= 1:
+                flash("Monthly Membership allows only one registered vehicle.", "error")
+                return redirect(url_for("member_detail", member_id=member.member_id))
+
         vin = request.form.get("vin", "").strip().upper()
         if vin and len(vin) != 17:
             flash("VIN must contain exactly 17 characters.", "error")
@@ -991,7 +1064,8 @@ Hello {member.name},
 Thank you for joining Carnova Oil Club!
 
 Membership ID: {member.member_id}
-Plan: {member.total_changes} Oil Changes
+Plan: {member.plan_name}
+Oil Changes Included: {member.total_changes}
 Remaining Oil Changes: {member.remaining_changes}
 Expiration Date: {member.expiration_date.strftime('%B %d, %Y')}
 
@@ -1016,10 +1090,343 @@ Phone: (978) 258-0029
         print("EMAIL ERROR:", e)
         return False
 
+MONTHLY_PRICE_ID = "price_1TxtO7R1GwRFNmYeGo3km5vf"
+MONTHLY_PRICE_ID_ALT = "price_1Txt07R1GwRFNmYeGo3km5vf"
+MONTHLY_PRICE_IDS = {MONTHLY_PRICE_ID, MONTHLY_PRICE_ID_ALT}
+
+STRIPE_PLANS = {
+    "price_1Tx6veR1GwRFNmYeUO2goMjz": {
+        "name": "Bronze",
+        "changes": 3,
+        "valid_days": 365,
+        "subscription": False,
+    },
+    "price_1TwiJER1GwRFNmYeeFbUdscR": {
+        "name": "Silver",
+        "changes": 5,
+        "valid_days": 548,
+        "subscription": False,
+    },
+    "price_1Tx70UR1GwRFNmYePYn1Xrdz": {
+        "name": "Gold",
+        "changes": 8,
+        "valid_days": 730,
+        "subscription": False,
+    },
+    MONTHLY_PRICE_ID: {
+        "name": "Monthly Membership",
+        "changes": 3,
+        "valid_days": 365,
+        "subscription": True,
+    },
+}
+
+
+def stripe_object_id(value):
+    """Return an ID whether Stripe supplied a string or expanded object."""
+    if isinstance(value, str):
+        return value
+    if value and hasattr(value, "get"):
+        return value.get("id")
+    return None
+
+
+def invoice_subscription_id(invoice):
+    """Support both legacy and newer Stripe invoice payload shapes."""
+    direct = stripe_object_id(invoice.get("subscription"))
+    if direct:
+        return direct
+    parent = invoice.get("parent") or {}
+    subscription_details = parent.get("subscription_details") or {}
+    return stripe_object_id(subscription_details.get("subscription"))
+
+
+def find_subscription_member(subscription_id=None, customer_id=None, payment_id=None, email=None):
+    if subscription_id:
+        member = Member.query.filter_by(stripe_subscription_id=subscription_id).first()
+        if member:
+            return member
+    if payment_id:
+        member = Member.query.filter_by(stripe_payment_id=payment_id).first()
+        if member:
+            return member
+    if customer_id:
+        member = (
+            Member.query.filter_by(stripe_customer_id=customer_id)
+            .order_by(Member.created_at.desc())
+            .first()
+        )
+        if member:
+            return member
+    if email:
+        normalized_email = email.strip().lower()
+        if normalized_email:
+            return (
+                Member.query.filter_by(email=normalized_email)
+                .filter(
+                    Member.stripe_subscription_id.is_(None),
+                    Member.stripe_customer_id.is_(None),
+                    Member.stripe_payment_id.is_(None),
+                )
+                .order_by(Member.created_at.desc())
+                .first()
+            )
+    return None
+
+
+def normalize_subscription_status(status, cancel_at_period_end=False):
+    if not status:
+        return None
+    if status in {"active", "trialing"}:
+        return "active"
+    if status in {"past_due", "unpaid", "incomplete", "incomplete_expired", "paused"}:
+        return "past_due"
+    if status in {"canceled", "cancelled"}:
+        return "cancelled"
+    if cancel_at_period_end and status == "active":
+        return "active"
+    return None
+
+
+def sync_subscription_details(member, subscription_id=None, customer_id=None, status=None, cancel_at_period_end=False):
+    member.stripe_subscription_id = subscription_id or member.stripe_subscription_id
+    member.stripe_customer_id = customer_id or member.stripe_customer_id
+    normalized_status = normalize_subscription_status(status, cancel_at_period_end=cancel_at_period_end)
+    if normalized_status is not None:
+        member.subscription_status = normalized_status
+    member.status = current_member_status(member)
+    return member
+
+
+def log_stripe_event(event_type, member, subscription_id, status):
+    member_id = member.member_id if member else "none"
+    subscription_value = subscription_id or "none"
+    print(f"Stripe event={event_type} member={member_id} subscription={subscription_value} status={status}")
+
+
+def advance_annual_benefit_period(member, paid_on):
+    """Refresh annual credits once the current 12-month benefit period ends."""
+    period_end = member.benefit_period_end or member.expiration_date
+    if not period_end or paid_on < period_end:
+        return False
+
+    # Advance in 365-day blocks in case more than one anniversary passed.
+    next_start = period_end
+    next_end = next_start + timedelta(days=365)
+    while paid_on >= next_end:
+        next_start = next_end
+        next_end = next_start + timedelta(days=365)
+
+    member.benefit_period_start = next_start
+    member.benefit_period_end = next_end
+    member.expiration_date = next_end
+    member.total_changes = 3
+    member.remaining_changes = 3
+    return True
+
+
+def mark_stripe_event_processed(event):
+    event_id = event.get("id")
+    if not event_id:
+        return
+    db.session.add(StripeEvent(event_id=event_id, event_type=event.get("type", "unknown")))
+
+
+def process_checkout_completed(obj):
+    details = obj.get("customer_details") or {}
+    shipping = obj.get("shipping_details") or {}
+    metadata = obj.get("metadata") or {}
+
+    email = details.get("email") or obj.get("customer_email")
+    customer_name = (
+        details.get("name")
+        or shipping.get("name")
+        or metadata.get("customer_name")
+        or obj.get("customer_name")
+    )
+    customer_phone = details.get("phone") or shipping.get("phone") or ""
+    customer_id = stripe_object_id(obj.get("customer"))
+    subscription_id = stripe_object_id(obj.get("subscription"))
+    payment_id = stripe_object_id(obj.get("payment_intent")) or obj.get("id")
+
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
+    if stripe_secret:
+        stripe.api_key = stripe_secret
+
+    if customer_id and stripe_secret and (not customer_name or not customer_phone):
+        try:
+            customer = stripe.Customer.retrieve(customer_id)
+            customer_name = customer_name or customer.get("name")
+            customer_phone = customer_phone or customer.get("phone") or ""
+            email = email or customer.get("email")
+        except Exception as error:
+            print("Error retrieving Stripe customer:", error)
+
+    line_items = stripe.checkout.Session.list_line_items(
+        obj.get("id"), limit=1, expand=["data.price"]
+    )
+    if not line_items.get("data"):
+        raise ValueError("Checkout session has no line items")
+    price_id = line_items["data"][0]["price"]["id"]
+
+    if obj.get("mode") == "subscription":
+        if price_id not in MONTHLY_PRICE_IDS:
+            print("Ignoring Stripe checkout session for unsupported subscription price:", price_id)
+            return None, False
+        selected_plan = STRIPE_PLANS.get(MONTHLY_PRICE_ID)
+    else:
+        selected_plan = STRIPE_PLANS.get(price_id)
+
+    if not selected_plan:
+        print("Ignoring Stripe checkout session for unsupported price:", price_id)
+        return None, False
+    if not email:
+        raise ValueError("Stripe checkout did not include a customer email")
+
+    today = date.today()
+    expiration = today + timedelta(days=selected_plan["valid_days"])
+    subscription_status = "active" if selected_plan["subscription"] else None
+
+    # Webhook retries and duplicate checkout events must not create duplicate members.
+    existing = find_subscription_member(
+        subscription_id=subscription_id,
+        customer_id=customer_id,
+        payment_id=payment_id,
+        email=email,
+    )
+    if existing:
+        normalized_email = email.strip().lower() if email else existing.email
+        existing.stripe_payment_id = payment_id or existing.stripe_payment_id
+        existing.stripe_customer_id = customer_id or existing.stripe_customer_id
+        existing.stripe_subscription_id = subscription_id or existing.stripe_subscription_id
+        existing.plan_name = selected_plan["name"]
+        existing.subscription_status = subscription_status or existing.subscription_status
+        existing.name = customer_name or existing.name or (normalized_email or "").split("@")[0].replace(".", " ").title()
+        existing.email = normalized_email or existing.email
+        existing.phone = customer_phone or existing.phone
+        existing.purchase_date = existing.purchase_date or today
+        existing.expiration_date = existing.expiration_date or expiration
+        existing.total_changes = max(existing.total_changes or 0, selected_plan["changes"])
+        existing.remaining_changes = max(existing.remaining_changes or 0, selected_plan["changes"])
+        existing.benefit_period_start = today if selected_plan["subscription"] else existing.benefit_period_start
+        existing.benefit_period_end = expiration if selected_plan["subscription"] else existing.benefit_period_end
+        existing.price_paid_cents = int(obj.get("amount_total") or existing.price_paid_cents or 0)
+        existing.status = current_member_status(existing)
+        db.session.flush()
+        return existing, False
+
+    if subscription_id and stripe_secret:
+        try:
+            subscription = stripe.Subscription.retrieve(subscription_id)
+            subscription_status = subscription.get("status") or subscription_status
+        except Exception as error:
+            print("Error retrieving Stripe subscription:", error)
+
+    member = Member(
+        member_id=next_member_id(),
+        name=customer_name or email.split("@")[0].replace(".", " ").title(),
+        email=email.strip().lower(),
+        phone=customer_phone,
+        purchase_date=today,
+        expiration_date=expiration,
+        total_changes=selected_plan["changes"],
+        remaining_changes=selected_plan["changes"],
+        status="active",
+        stripe_payment_id=payment_id,
+        stripe_customer_id=customer_id,
+        stripe_subscription_id=subscription_id,
+        plan_name=selected_plan["name"],
+        subscription_status=subscription_status,
+        benefit_period_start=today if selected_plan["subscription"] else None,
+        benefit_period_end=expiration if selected_plan["subscription"] else None,
+        price_paid_cents=int(obj.get("amount_total") or 0),
+        token=secrets.token_urlsafe(24),
+    )
+    member.status = current_member_status(member)
+    db.session.add(member)
+    db.session.flush()
+    return member, True
+
+
+def process_invoice_payment_succeeded(obj):
+    subscription_id = invoice_subscription_id(obj)
+    customer_id = stripe_object_id(obj.get("customer"))
+    customer_details = obj.get("customer_details") or {}
+    email = customer_details.get("email") or obj.get("customer_email")
+    member = find_subscription_member(
+        subscription_id=subscription_id,
+        customer_id=customer_id,
+        email=email,
+    )
+    if not member:
+        print("No member found for successful invoice:", obj.get("id"))
+        return
+
+    sync_subscription_details(member, subscription_id=subscription_id, customer_id=customer_id, status="active")
+    paid_timestamp = obj.get("status_transitions", {}).get("paid_at") or obj.get("created")
+    paid_on = datetime.utcfromtimestamp(paid_timestamp).date() if paid_timestamp else date.today()
+    advance_annual_benefit_period(member, paid_on)
+    member.status = current_member_status(member)
+    log_stripe_event("invoice.paid", member, subscription_id, member.subscription_status)
+
+
+def process_invoice_payment_failed(obj):
+    subscription_id = invoice_subscription_id(obj)
+    customer_id = stripe_object_id(obj.get("customer"))
+    customer_details = obj.get("customer_details") or {}
+    email = customer_details.get("email") or obj.get("customer_email")
+    member = find_subscription_member(
+        subscription_id=subscription_id,
+        customer_id=customer_id,
+        email=email,
+    )
+    if member:
+        sync_subscription_details(member, subscription_id=subscription_id, customer_id=customer_id, status="past_due")
+        log_stripe_event("invoice.payment_failed", member, subscription_id, member.subscription_status)
+
+
+def process_subscription_updated(obj):
+    subscription_id = stripe_object_id(obj.get("id"))
+    customer_id = stripe_object_id(obj.get("customer"))
+    customer_details = obj.get("customer_details") or {}
+    email = customer_details.get("email") or obj.get("customer_email")
+    member = find_subscription_member(
+        subscription_id=subscription_id,
+        customer_id=customer_id,
+        email=email,
+    )
+    if not member:
+        print("No member found for subscription update:", subscription_id)
+        return
+
+    sync_subscription_details(
+        member,
+        subscription_id=subscription_id,
+        customer_id=customer_id,
+        status=obj.get("status") or member.subscription_status,
+        cancel_at_period_end=bool(obj.get("cancel_at_period_end")),
+    )
+    log_stripe_event("customer.subscription.updated", member, subscription_id, member.subscription_status)
+
+
+def process_subscription_deleted(obj):
+    subscription_id = stripe_object_id(obj.get("id"))
+    customer_id = stripe_object_id(obj.get("customer"))
+    customer_details = obj.get("customer_details") or {}
+    email = customer_details.get("email") or obj.get("customer_email")
+    member = find_subscription_member(
+        subscription_id=subscription_id,
+        customer_id=customer_id,
+        email=email,
+    )
+    if member:
+        sync_subscription_details(member, subscription_id=subscription_id, customer_id=customer_id, status="canceled")
+        log_stripe_event("customer.subscription.deleted", member, subscription_id, member.subscription_status)
+
+
 @app.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
     webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
-
     if not webhook_secret:
         return "Webhook secret not configured", 500
 
@@ -1029,107 +1436,50 @@ def stripe_webhook():
             request.headers.get("Stripe-Signature", ""),
             webhook_secret,
         )
-    except Exception:
+    except Exception as error:
+        print("Invalid Stripe webhook:", error)
         return "Invalid webhook", 400
 
-    if event["type"] != "checkout.session.completed":
+    event_id = event.get("id")
+    if event_id and StripeEvent.query.filter_by(event_id=event_id).first():
         return "", 200
 
+    event_type = event.get("type")
     obj = event["data"]["object"]
-
-    details = obj.get("customer_details") or {}
-    shipping = obj.get("shipping_details") or {}
-
-    email = details.get("email") or obj.get("customer_email")
-    payment_id = obj.get("payment_intent") or obj.get("id")
-
-    customer_name = (
-        details.get("name")
-        or shipping.get("name")
-        or (obj.get("metadata") or {}).get("customer_name")
-        or obj.get("customer_name")
-    )
-
-    customer_phone = (
-        details.get("phone")
-        or shipping.get("phone")
-        or ""
-    )
-
-    stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
-    customer_id = obj.get("customer")
-
-    if stripe_secret and customer_id and (not customer_name or not customer_phone):
-        try:
-            stripe.api_key = stripe_secret
-            customer = stripe.Customer.retrieve(customer_id)
-
-            customer_name = customer_name or customer.get("name")
-            customer_phone = customer_phone or customer.get("phone") or ""
-
-        except Exception as error:
-            print("Error retrieving Stripe customer:", error)
+    new_member = None
 
     try:
-        stripe.api_key = stripe_secret
+        if event_type == "checkout.session.completed":
+            new_member, was_created = process_checkout_completed(obj)
+            if not was_created:
+                new_member = None
+        elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
+            process_invoice_payment_succeeded(obj)
+        elif event_type == "invoice.payment_failed":
+            process_invoice_payment_failed(obj)
+        elif event_type == "customer.subscription.created":
+            process_subscription_updated(obj)
+        elif event_type == "customer.subscription.updated":
+            process_subscription_updated(obj)
+        elif event_type == "customer.subscription.deleted":
+            process_subscription_deleted(obj)
+        else:
+            return "", 200
 
-        line_items = stripe.checkout.Session.list_line_items(
-            obj.get("id"),
-            limit=1,
-            expand=["data.price"],
-        )
-
-        price_id = line_items["data"][0]["price"]["id"]
-
-    except Exception as error:
-        print("Error retrieving Stripe Price ID:", error)
-        return "Unable to identify membership plan", 400
-
-    plans = {
-        "price_1Tx6veR1GwRFNmYeUO2goMjz": {
-            "changes": 3,
-            "valid_days": 365,
-        },
-        "price_1TwiJER1GwRFNmYeeFbUdscR": {
-            "changes": 5,
-            "valid_days": 548,
-        },
-        "price_1Tx70UR1GwRFNmYePYn1Xrdz": {
-            "changes": 8,
-            "valid_days": 730,
-        },
-    }
-
-    selected_plan = plans.get(price_id)
-
-    if not selected_plan:
-        print("Unknown Stripe Price ID:", price_id)
-        return "Unknown membership plan", 400
-
-    if email and not Member.query.filter_by(
-        stripe_payment_id=payment_id
-    ).first():
-
-        member = Member(
-            member_id=next_member_id(),
-            name=customer_name or email.split("@")[0].replace(".", " ").title(),
-            email=email.strip().lower(),
-            phone=customer_phone,
-            purchase_date=date.today(),
-            expiration_date=date.today()
-            + timedelta(days=selected_plan["valid_days"]),
-            total_changes=selected_plan["changes"],
-            remaining_changes=selected_plan["changes"],
-            stripe_payment_id=payment_id,
-            price_paid_cents=int(obj.get("amount_total") or 0),
-            token=secrets.token_urlsafe(24),
-        )
-
-        db.session.add(member)
+        mark_stripe_event_processed(event)
         db.session.commit()
-        
-        send_membership_confirmation_email(member)
-   
+    except ValueError as error:
+        db.session.rollback()
+        print("Stripe webhook data error:", error)
+        return str(error), 400
+    except Exception as error:
+        db.session.rollback()
+        print("Stripe webhook processing error:", error)
+        return "Webhook processing failed", 500
+
+    if new_member:
+        send_membership_confirmation_email(new_member)
+
     return "", 200
 
 if __name__ == "__main__":

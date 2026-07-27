@@ -10,7 +10,7 @@
 </div>
 
 <section class="panel form-panel">
-  <form method="post" class="form-grid">
+  <form method="post" action="{{ url_for('new_vehicle', member_id=member.member_id) }}" class="form-grid">
     <label>Year<input name="year" maxlength="4" inputmode="numeric" value="{{ vehicle.year if vehicle else '' }}" placeholder="2023"></label>
     <label>Make<input name="make" value="{{ vehicle.make if vehicle else '' }}" placeholder="Toyota" required></label>
     <label>Model<input name="model" value="{{ vehicle.model if vehicle else '' }}" placeholder="RAV4" required></label>

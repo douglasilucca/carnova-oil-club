@@ -8,8 +8,13 @@
   <label>Email<input type="email" name="email" required></label>
   <label>Phone<input name="phone"></label>
   <label>Purchase date<input type="date" name="purchase_date" value="{{ today.isoformat() }}" required></label>
+  <label>Membership plan<select name="membership_plan">
+    <option value="">Custom package</option>
+    <option value="monthly_membership">Monthly Membership — $29.99/month</option>
+  </select></label>
   <label>Expiration date<input type="date" name="expiration_date"></label>
   <label>Total oil changes<input type="number" min="1" max="20" name="total_changes" value="5" required></label>
+  <p class="muted wide">Choosing Monthly Membership applies 3 oil changes for 365 days and allows one registered vehicle.</p>
   <div class="wide actions"><button class="button primary" type="submit">Create Member</button><a class="button ghost" href="{{ url_for('dashboard') }}">Cancel</a></div>
 </form>
 </section>
