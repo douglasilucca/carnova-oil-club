@@ -10,39 +10,92 @@
   </div>
 </div>
 
-<section class="stats premium-stats">
-  <article><span>Total Members</span><strong>{{ stats.total_members }}</strong><small>all memberships</small></article>
-  <article><span>Active</span><strong>{{ stats.active_members }}</strong><small>currently usable</small></article>
-  <article><span>Remaining Services</span><strong>{{ stats.remaining_changes }}</strong><small>future obligations</small></article>
-  <article><span>Services Completed</span><strong>{{ stats.redeemed_changes }}</strong><small>all time</small></article>
-  <article><span>Program Revenue</span><strong>${{ "{:,.0f}".format(stats.revenue) }}</strong><small>membership sales</small></article>
+<section class="stats executive-stats">
+  <article><span>Active Members</span><strong>{{ stats.active_members }}</strong><small>status: active</small></article>
+  <article><span>Monthly Revenue</span><strong>${{ "{:,.2f}".format(stats.monthly_revenue) }}</strong><small>current month paid memberships</small></article>
+  <article><span>Oil Changes This Month</span><strong>{{ stats.monthly_oil_changes }}</strong><small>services redeemed this month</small></article>
+  <article><span>Upcoming Renewals</span><strong>{{ stats.upcoming_renewals }}</strong><small>expiring within 30 days</small></article>
 </section>
 
-<section class="finance-grid">
-  <article class="finance-card">
-    <p class="eyebrow">PROGRAM FINANCIAL VIEW</p>
-    <h2>Estimated Position</h2>
-    <div class="finance-row"><span>Collected revenue</span><strong>${{ "{:,.2f}".format(stats.revenue) }}</strong></div>
-    <div class="finance-row"><span>Estimated remaining service cost</span><strong>${{ "{:,.2f}".format(stats.outstanding_cost) }}</strong></div>
-    <div class="finance-row total"><span>Estimated program position</span><strong>${{ "{:,.2f}".format(stats.estimated_profit) }}</strong></div>
-    <p class="fineprint">Estimate uses the configured cost per remaining oil change.</p>
+<section class="executive-charts">
+  <article class="panel chart-panel">
+    <div class="panel-heading">
+      <div><p class="eyebrow">TREND</p><h2>Monthly Revenue (12 Months)</h2></div>
+    </div>
+    <div class="chart-wrap"><canvas id="revenueChart" aria-label="Monthly revenue chart" role="img"></canvas></div>
   </article>
 
-  <article class="finance-card">
-    <p class="eyebrow">MEMBERSHIP UTILIZATION</p>
-    <h2>Program Activity</h2>
-    {% set total_capacity = stats.remaining_changes + stats.redeemed_changes %}
-    {% set used_pct = (stats.redeemed_changes / total_capacity * 100) if total_capacity else 0 %}
-    <div class="donut" style="--value: {{ used_pct }};"><div><strong>{{ used_pct|round|int }}%</strong><span>redeemed</span></div></div>
-    <div class="legend"><span><i class="used"></i>Completed {{ stats.redeemed_changes }}</span><span><i></i>Remaining {{ stats.remaining_changes }}</span></div>
+  <article class="panel chart-panel">
+    <div class="panel-heading">
+      <div><p class="eyebrow">TREND</p><h2>Monthly New Members (12 Months)</h2></div>
+    </div>
+    <div class="chart-wrap"><canvas id="newMembersChart" aria-label="Monthly new members chart" role="img"></canvas></div>
+  </article>
+</section>
+
+<section class="executive-tables">
+  <article class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">RENEWALS</p><h2>Upcoming Renewals</h2></div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Member</th><th>Plan</th><th>Renewal Date</th><th>Days Remaining</th></tr></thead>
+        <tbody>
+        {% for member in upcoming_renewals %}
+          {% set days_remaining = (member.expiration_date - today).days %}
+          <tr>
+            <td><a href="{{ url_for('member_detail', member_id=member.member_id) }}">{{ member.name }}</a></td>
+            <td>{{ member.plan_name or 'Prepaid Package' }}</td>
+            <td>{{ member.expiration_date.strftime('%b %d, %Y') }}</td>
+            <td>{{ days_remaining }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="empty">No renewals due in the next 30 days.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </article>
 
-  <article class="finance-card alerts-card">
-    <p class="eyebrow">ATTENTION</p>
-    <h2>Membership Alerts</h2>
-    <div class="alert-number">{{ stats.expiring_soon }}</div>
-    <p>memberships expiring within the next 30 days</p>
-    <a href="{{ url_for('dashboard', status='active') }}">Review active members →</a>
+  <article class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">CUSTOMERS</p><h2>Recent Members</h2></div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Member ID</th><th>Name</th><th>Plan</th><th>Joined</th></tr></thead>
+        <tbody>
+        {% for member in recent_members %}
+          <tr>
+            <td><a href="{{ url_for('member_detail', member_id=member.member_id) }}">{{ member.member_id }}</a></td>
+            <td>{{ member.name }}</td>
+            <td>{{ member.plan_name or 'Prepaid Package' }}</td>
+            <td>{{ member.created_at.strftime('%b %d, %Y') }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="empty">No members yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+
+  <article class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">SERVICES</p><h2>Recent Services</h2></div><a href="{{ url_for('history') }}">View all →</a></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Date</th><th>Member</th><th>Customer</th><th>Vehicle</th></tr></thead>
+        <tbody>
+        {% for item in recent_redemptions %}
+        <tr>
+          <td>{{ item.redeemed_at.strftime('%b %d, %Y %I:%M %p') }}</td>
+          <td><a href="{{ url_for('member_detail', member_id=item.member.member_id) }}">{{ item.member.member_id }}</a></td>
+          <td>{{ item.member.name }}</td>
+          <td>{{ item.vehicle or '—' }}</td>
+        </tr>
+        {% else %}
+          <tr><td colspan="4" class="empty">No services recorded yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </article>
 </section>
 
@@ -110,23 +163,103 @@
   </div>
 </section>
 
-<section class="panel">
-  <div class="panel-heading"><div><p class="eyebrow">LATEST ACTIVITY</p><h2>Recent Services</h2></div><a href="{{ url_for('history') }}">View all →</a></div>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Date</th><th>Member</th><th>Customer</th><th>Vehicle</th><th>Mileage</th></tr></thead>
-      <tbody>
-      {% for item in recent_redemptions %}
-      <tr>
-        <td>{{ item.redeemed_at.strftime('%b %d, %Y %I:%M %p') }}</td>
-        <td><a href="{{ url_for('member_detail', member_id=item.member.member_id) }}">{{ item.member.member_id }}</a></td>
-        <td>{{ item.member.name }}</td>
-        <td>{{ item.vehicle or '—' }}</td>
-        <td>{{ item.mileage or '—' }}</td>
-      </tr>
-      {% else %}<tr><td colspan="5" class="empty">No services recorded yet.</td></tr>{% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script>
+  const chartLabels = {{ chart_labels | tojson }};
+  const revenueData = {{ monthly_revenue_chart | tojson }};
+  const newMembersData = {{ monthly_new_members_chart | tojson }};
+
+  const currencyFormatter = (value) => {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(value);
+  };
+
+  const chartBaseOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false }
+    },
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: { color: "#475467", maxRotation: 0, autoSkip: true }
+      },
+      y: {
+        grid: { color: "#e4e7ec" },
+        ticks: { color: "#475467" }
+      }
+    }
+  };
+
+  new Chart(document.getElementById("revenueChart"), {
+    type: "line",
+    data: {
+      labels: chartLabels,
+      datasets: [{
+        data: revenueData,
+        borderColor: "#087b78",
+        backgroundColor: "rgba(8,123,120,0.16)",
+        pointBackgroundColor: "#087b78",
+        fill: true,
+        tension: 0.35,
+        borderWidth: 3
+      }]
+    },
+    options: {
+      ...chartBaseOptions,
+      plugins: {
+        ...chartBaseOptions.plugins,
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `Revenue: ${currencyFormatter(ctx.parsed.y || 0)}`
+          }
+        }
+      },
+      scales: {
+        ...chartBaseOptions.scales,
+        y: {
+          ...chartBaseOptions.scales.y,
+          ticks: {
+            color: "#475467",
+            callback: (value) => currencyFormatter(value)
+          }
+        }
+      }
+    }
+  });
+
+  new Chart(document.getElementById("newMembersChart"), {
+    type: "bar",
+    data: {
+      labels: chartLabels,
+      datasets: [{
+        data: newMembersData,
+        backgroundColor: "rgba(8,123,120,0.76)",
+        borderRadius: 6,
+        maxBarThickness: 34
+      }]
+    },
+    options: {
+      ...chartBaseOptions,
+      plugins: {
+        ...chartBaseOptions.plugins,
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `New members: ${ctx.parsed.y || 0}`
+          }
+        }
+      },
+      scales: {
+        ...chartBaseOptions.scales,
+        y: {
+          ...chartBaseOptions.scales.y,
+          ticks: {
+            color: "#475467",
+            precision: 0
+          }
+        }
+      }
+    }
+  });
+</script>
 {% endblock %}

@@ -479,6 +479,16 @@ def dashboard():
     refresh_member_statuses()
     q = request.args.get("q", "").strip()
     status_filter = request.args.get("status", "").strip()
+    today = date.today()
+
+    def add_months(base_date, month_delta):
+        month_index = (base_date.year * 12 + (base_date.month - 1)) + month_delta
+        year = month_index // 12
+        month = month_index % 12 + 1
+        return date(year, month, 1)
+
+    month_start = date(today.year, today.month, 1)
+    next_month_start = add_months(month_start, 1)
 
     query = Member.query
     if q:
@@ -497,17 +507,64 @@ def dashboard():
     members = query.order_by(Member.created_at.desc()).all()
     all_members = Member.query.all()
     all_redemptions = Redemption.query.count()
-    expiring_cutoff = date.today() + timedelta(days=30)
+    expiring_cutoff = today + timedelta(days=30)
 
     total_revenue_cents = sum((member.price_paid_cents or 0) for member in all_members)
     estimated_service_cost_cents = stats_cost = int(os.environ.get("ESTIMATED_COST_PER_CHANGE_CENTS", "6500"))
     outstanding_cost_cents = sum(member.remaining_changes for member in all_members) * estimated_service_cost_cents
 
+    monthly_revenue_cents = sum(
+        (member.price_paid_cents or 0)
+        for member in Member.query.filter(
+            Member.purchase_date >= month_start,
+            Member.purchase_date < next_month_start,
+        ).all()
+    )
+    monthly_oil_changes = Redemption.query.filter(
+        Redemption.redeemed_at >= datetime.combine(month_start, time.min),
+        Redemption.redeemed_at < datetime.combine(next_month_start, time.min),
+    ).count()
+
+    upcoming_renewals = (
+        Member.query.filter(
+            Member.status == "active",
+            Member.expiration_date >= today,
+            Member.expiration_date <= expiring_cutoff,
+        )
+        .order_by(Member.expiration_date.asc())
+        .limit(10)
+        .all()
+    )
+
+    recent_members = Member.query.order_by(Member.created_at.desc()).limit(10).all()
+
+    first_chart_month = add_months(month_start, -11)
+    chart_months = [add_months(first_chart_month, i) for i in range(12)]
+    chart_labels = [month.strftime("%b %Y") for month in chart_months]
+    chart_keys = [(month.year, month.month) for month in chart_months]
+
+    revenue_by_month = {key: 0 for key in chart_keys}
+    new_members_by_month = {key: 0 for key in chart_keys}
+
+    members_for_charts = Member.query.filter(
+        Member.purchase_date >= first_chart_month,
+        Member.purchase_date < next_month_start,
+    ).all()
+    for member in members_for_charts:
+        key = (member.purchase_date.year, member.purchase_date.month)
+        if key in revenue_by_month:
+            revenue_by_month[key] += member.price_paid_cents or 0
+            new_members_by_month[key] += 1
+
+    monthly_revenue_chart = [round(revenue_by_month[key] / 100, 2) for key in chart_keys]
+    monthly_new_members_chart = [new_members_by_month[key] for key in chart_keys]
+
     stats = {
         "total_members": len(all_members),
-        "active_members": sum(
-            1 for member in all_members if current_member_status(member) == "active"
-        ),
+        "active_members": Member.query.filter_by(status="active").count(),
+        "monthly_revenue": monthly_revenue_cents / 100,
+        "monthly_oil_changes": monthly_oil_changes,
+        "upcoming_renewals": len(upcoming_renewals),
         "remaining_changes": sum(member.remaining_changes for member in all_members),
         "redeemed_changes": all_redemptions,
         "revenue": total_revenue_cents / 100,
@@ -532,7 +589,7 @@ def dashboard():
     )
 
     recent_redemptions = (
-        Redemption.query.order_by(Redemption.redeemed_at.desc()).limit(8).all()
+        Redemption.query.order_by(Redemption.redeemed_at.desc()).limit(10).all()
     )
 
     return render_template(
@@ -542,6 +599,11 @@ def dashboard():
         q=q,
         status_filter=status_filter,
         recent_redemptions=recent_redemptions,
+        recent_members=recent_members,
+        upcoming_renewals=upcoming_renewals,
+        chart_labels=chart_labels,
+        monthly_revenue_chart=monthly_revenue_chart,
+        monthly_new_members_chart=monthly_new_members_chart,
         upcoming_appointments=upcoming_appointments,
     )
 
