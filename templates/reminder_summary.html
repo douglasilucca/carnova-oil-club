@@ -1,36 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Reminder Run Summary | Carnova Oil Club{% endblock %}
 {% block content %}
-<section class="panel" style="max-width:760px;margin:0 auto;">
+<section class="panel reminder-summary-panel">
   <p class="eyebrow">AUTOMATION</p>
   <h1>Reminder Run Summary</h1>
-  <div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:18px;">
-    <article><span>Sent</span><strong>{{ summary.sent }}</strong></article>
-    <article><span>Skipped</span><strong>{{ summary.skipped }}</strong></article>
-    <article><span>Failed</span><strong>{{ summary.failed }}</strong></article>
+  <div class="stats reminder-summary-stats">
+    <article><span>Sent</span><strong><span class="badge sent">{{ summary.sent }}</span></strong></article>
+    <article><span>Skipped</span><strong><span class="badge skipped">{{ summary.skipped }}</span></strong></article>
+    <article><span>Failed</span><strong><span class="badge failed">{{ summary.failed }}</span></strong></article>
   </div>
 
-  <div class="table-wrap" style="margin-top:8px;">
-    <table>
+  <div class="table-wrap reminder-table-wrap">
+    <table class="reminder-table compact-cols">
       <thead><tr><th>Reminder Type</th><th>Sent</th><th>Skipped</th><th>Failed</th></tr></thead>
       <tbody>
         <tr>
           <td>Renewal</td>
-          <td>{{ summary.renewal.sent }}</td>
-          <td>{{ summary.renewal.skipped }}</td>
-          <td>{{ summary.renewal.failed }}</td>
+          <td><span class="badge sent">{{ summary.renewal.sent }}</span></td>
+          <td><span class="badge skipped">{{ summary.renewal.skipped }}</span></td>
+          <td><span class="badge failed">{{ summary.renewal.failed }}</span></td>
         </tr>
         <tr>
           <td>Unused Benefit</td>
-          <td>{{ summary.unused_benefit.sent }}</td>
-          <td>{{ summary.unused_benefit.skipped }}</td>
-          <td>{{ summary.unused_benefit.failed }}</td>
+          <td><span class="badge sent">{{ summary.unused_benefit.sent }}</span></td>
+          <td><span class="badge skipped">{{ summary.unused_benefit.skipped }}</span></td>
+          <td><span class="badge failed">{{ summary.unused_benefit.failed }}</span></td>
         </tr>
       </tbody>
     </table>
   </div>
 
-  <section class="panel" style="margin-top:16px;">
+  <section class="panel reminder-section">
     <p class="eyebrow">SKIP DETAILS</p>
     <h2>Renewal reminders</h2>
     {% set renewal_reason_labels = {
@@ -41,8 +41,8 @@
       'missing_email': 'missing email addresses'
     } %}
     {% set renewal_nonzero = namespace(count=0) %}
-    <div class="table-wrap">
-      <table>
+    <div class="table-wrap reminder-table-wrap">
+      <table class="reminder-table">
         <thead><tr><th>Reason</th><th>Count</th></tr></thead>
         <tbody>
           {% for reason_key, label in renewal_reason_labels.items() %}
@@ -59,7 +59,7 @@
       </table>
     </div>
 
-    <h2 style="margin-top:18px;">Unused-benefit reminders</h2>
+    <h2 class="subsection-heading">Unused-benefit reminders</h2>
     {% set unused_reason_labels = {
       'inactive_member': 'inactive members',
       'zero_remaining_changes': 'members with no remaining oil changes',
@@ -68,8 +68,8 @@
       'missing_email': 'missing email addresses'
     } %}
     {% set unused_nonzero = namespace(count=0) %}
-    <div class="table-wrap">
-      <table>
+    <div class="table-wrap reminder-table-wrap">
+      <table class="reminder-table">
         <thead><tr><th>Reason</th><th>Count</th></tr></thead>
         <tbody>
           {% for reason_key, label in unused_reason_labels.items() %}
@@ -87,11 +87,11 @@
     </div>
   </section>
 
-  <section class="panel" style="margin-top:16px;">
+  <section class="panel reminder-section">
     <p class="eyebrow">RESULTS</p>
     <h2>Eligible reminders sent</h2>
-    <div class="table-wrap">
-      <table>
+    <div class="table-wrap reminder-table-wrap">
+      <table class="reminder-table reminder-result-table">
         <thead><tr><th>Member</th><th>Reminder Type</th><th>Email</th><th>Status</th></tr></thead>
         <tbody>
           {% for item in summary.sent_details %}
@@ -99,7 +99,7 @@
               <td>{{ item.member_name }}</td>
               <td>{{ item.reminder_type|replace('_', ' ')|title }}</td>
               <td>{{ item.email }}</td>
-              <td>{{ item.status|title }}</td>
+              <td><span class="badge sent">{{ item.status|title }}</span></td>
             </tr>
           {% else %}
             <tr><td colspan="4" class="empty">No reminders were sent in this run.</td></tr>
@@ -108,9 +108,9 @@
       </table>
     </div>
 
-    <h2 style="margin-top:18px;">Failed reminders</h2>
-    <div class="table-wrap">
-      <table>
+    <h2 class="subsection-heading">Failed reminders</h2>
+    <div class="table-wrap reminder-table-wrap">
+      <table class="reminder-table reminder-result-table">
         <thead><tr><th>Member</th><th>Reminder Type</th><th>Email</th><th>Error Message</th></tr></thead>
         <tbody>
           {% for item in summary.failed_details %}
@@ -121,14 +121,14 @@
               <td>{{ item.error }}</td>
             </tr>
           {% else %}
-            <tr><td colspan="4" class="empty">No reminder failures in this run.</td></tr>
+            <tr><td colspan="4" class="empty center-empty">No reminder failures in this run.</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
   </section>
 
-  <div class="actions" style="margin-top:16px;">
+  <div class="actions reminder-actions">
     <a class="button secondary" href="{{ url_for('dashboard') }}">Back to Dashboard</a>
   </div>
 </section>
