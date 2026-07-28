@@ -534,37 +534,117 @@ View your digital membership card:
     return send_smtp_email(member.email, subject, text_body, html_body)
 
 
+def member_primary_vehicle(member):
+    return Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).first()
+
+
 def send_unused_benefit_reminder_email(member):
-    vehicle = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).first()
-    vehicle_text = vehicle.display_name if vehicle else "No registered vehicle"
-    with app.test_request_context("/"):
-        appointment_link = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
-    subject = "Use Your Carnova Oil Club Benefits"
-    text_body = f"""Hello {member.name},
+        vehicle = member_primary_vehicle(member)
+        has_vehicle = vehicle is not None
+
+        with app.test_request_context("/"):
+                appointment_link = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
+                register_vehicle_link = f"{resolve_public_base_url()}{url_for('public_register_vehicle', token=member.token)}"
+
+        if has_vehicle:
+                headline = "Your Carnova Oil Club Benefits Are Waiting"
+                vehicle_line = f"{vehicle.year} {vehicle.make} {vehicle.model}".strip()
+                plate_line = vehicle.plate or "Not provided"
+                button_label = "Schedule My Oil Change"
+                action_url = appointment_link
+                closing_text = "Don't let your membership benefits go unused. Schedule your next oil change today and keep your vehicle running at its best."
+                vehicle_status_label = "Registered Vehicle"
+                vehicle_status_value = vehicle_line
+                vehicle_plate_label = "License Plate"
+                vehicle_plate_value = plate_line
+        else:
+                headline = "Complete Your Membership Setup"
+                button_label = "Register My Vehicle"
+                action_url = register_vehicle_link
+                closing_text = "Register your vehicle today so you can begin using your Carnova Oil Club benefits."
+                vehicle_status_label = "Vehicle Status"
+                vehicle_status_value = "Registration Required"
+                vehicle_plate_label = "License Plate"
+                vehicle_plate_value = "Registration Required"
+
+        subject = "Use Your Carnova Oil Club Benefits"
+        text_body = f"""Hello {member.name},
 
 You still have unused oil change benefits waiting.
 
 Remaining Oil Changes: {member.remaining_changes}
-Registered Vehicle: {vehicle_text}
+{vehicle_status_label}: {vehicle_status_value}
+{vehicle_plate_label}: {vehicle_plate_value}
 
-Schedule your next oil change:
-{appointment_link}
+{button_label}:
+{action_url}
+
+{closing_text}
+
+Carnova of Southborough
+251 Turnpike Rd
+Southborough, MA 01772
+Phone: (978) 258-0029
+Email: info@carnovaoil.com
 """
-    html_body = f"""<!DOCTYPE html>
+        html_body = f"""<!DOCTYPE html>
 <html lang=\"en\">
-  <body style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;color:#101820;padding:20px;\">
-    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px;margin:auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;\">
-      <tr><td style=\"padding:24px;\">
-        <h1 style=\"margin:0 0 12px;font-size:24px;\">Use Your Membership Benefits</h1>
-        <p style=\"margin:0 0 14px;\">Hello {member.name}, you still have service benefits available.</p>
-        <p style=\"margin:0 0 8px;\"><strong>Remaining Oil Changes:</strong> {member.remaining_changes}</p>
-        <p style=\"margin:0 0 20px;\"><strong>Registered Vehicle:</strong> {vehicle_text}</p>
-        <p style=\"margin:0;\"><a href=\"{appointment_link}\" style=\"display:inline-block;background:#087b78;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;\">Schedule My Oil Change</a></p>
-      </td></tr>
-    </table>
-  </body>
+    <body style=\"margin:0;padding:0;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;color:#101820;\">
+        <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"padding:18px 10px;background:#f4f6f8;\">
+            <tr>
+                <td align=\"center\">
+                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:620px;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;\">
+                        <tr>
+                            <td style=\"padding:20px 22px;background:#0f172a;border-bottom:3px solid #d5a836;\">
+                                <p style=\"margin:0 0 8px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#9cc9c6;font-weight:700;\">Carnova Oil Club</p>
+                                <h1 style=\"margin:0;font-size:24px;line-height:1.3;color:#ffffff;\">{headline}</h1>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style=\"padding:22px;\">
+                                <p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;\">Hello {member.name},</p>
+                                <p style=\"margin:0 0 18px;font-size:14px;line-height:1.65;color:#334155;\">You still have valuable oil change benefits ready to use.</p>
+
+                                <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin:0 0 14px;border-collapse:separate;border-spacing:0 10px;\">
+                                    <tr>
+                                        <td style=\"background:#f8fafc;border:1px solid #e5e7eb;border-left:4px solid #d5a836;border-radius:10px;padding:12px 14px;\">
+                                            <p style=\"margin:0 0 5px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;\">Remaining Oil Changes</p>
+                                            <p style=\"margin:0;font-size:22px;font-weight:800;color:#0f172a;\">{member.remaining_changes}</p>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td style=\"background:#f8fafc;border:1px solid #e5e7eb;border-left:4px solid #0ea5a2;border-radius:10px;padding:12px 14px;\">
+                                            <p style=\"margin:0 0 5px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:700;\">{vehicle_status_label}</p>
+                                            <p style=\"margin:0;font-size:16px;font-weight:700;color:#0f172a;\">{vehicle_status_value}</p>
+                                            <p style=\"margin:6px 0 0;font-size:13px;color:#334155;\"><strong>{vehicle_plate_label}:</strong> {vehicle_plate_value}</p>
+                                        </td>
+                                    </tr>
+                                </table>
+
+                                <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin:0 0 16px;\">
+                                    <tr>
+                                        <td style=\"border-radius:8px;background:#0ea5a2;\">
+                                            <a href=\"{action_url}\" style=\"display:inline-block;padding:13px 20px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;\">{button_label}</a>
+                                        </td>
+                                    </tr>
+                                </table>
+
+                                <p style=\"margin:0;font-size:14px;line-height:1.65;color:#334155;\">{closing_text}</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style=\"padding:16px 22px;background:#f8fafc;border-top:1px solid #e5e7eb;\">
+                                <p style=\"margin:0;font-size:13px;font-weight:700;color:#0f172a;\">Carnova of Southborough</p>
+                                <p style=\"margin:6px 0 0;font-size:13px;line-height:1.6;color:#334155;\">251 Turnpike Rd<br>Southborough, MA 01772<br>Phone: (978) 258-0029<br>Email: info@carnovaoil.com</p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
 </html>"""
-    return send_smtp_email(member.email, subject, text_body, html_body)
+        return send_smtp_email(member.email, subject, text_body, html_body)
 
 
 def run_renewal_reminders(reference_date=None):

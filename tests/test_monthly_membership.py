@@ -15,6 +15,7 @@ from app import (
     monthly_membership_defaults,
     run_renewal_reminders,
     run_unused_benefit_reminders,
+    send_unused_benefit_reminder_email,
 )
 from app import app as flask_app
 
@@ -948,3 +949,58 @@ def test_unused_benefit_member_with_zero_remaining_changes_skipped(client, monke
     assert summary["sent"] == 0
     assert summary["skipped"] >= 1
     assert ReminderLog.query.filter_by(reminder_type="unused_benefit").count() == 0
+
+
+def test_unused_benefit_email_with_vehicle_uses_schedule_cta(client, monkeypatch):
+    member = _create_member_for_reminders("email-vehicle@example.com", expiration_days=180)
+    db.session.add(
+        Vehicle(
+            member_id=member.id,
+            year="2021",
+            make="Toyota",
+            model="Camry",
+            plate="ABC123",
+            color="Black",
+        )
+    )
+    db.session.commit()
+
+    captured = {}
+
+    def fake_send_smtp_email(recipient, subject, text_body, html_body=None):
+        captured["recipient"] = recipient
+        captured["subject"] = subject
+        captured["text_body"] = text_body
+        captured["html_body"] = html_body
+        return True
+
+    monkeypatch.setattr("app.send_smtp_email", fake_send_smtp_email)
+
+    assert send_unused_benefit_reminder_email(member) is True
+    assert "Your Carnova Oil Club Benefits Are Waiting" in captured["html_body"]
+    assert "Schedule My Oil Change" in captured["html_body"]
+    assert f"/m/{member.token}/appointments/new" in captured["html_body"]
+    assert "2021 Toyota Camry" in captured["html_body"]
+    assert "License Plate" in captured["html_body"]
+    assert "ABC123" in captured["html_body"]
+
+
+def test_unused_benefit_email_without_vehicle_uses_register_cta(client, monkeypatch):
+    member = _create_member_for_reminders("email-no-vehicle@example.com", expiration_days=180)
+
+    captured = {}
+
+    def fake_send_smtp_email(recipient, subject, text_body, html_body=None):
+        captured["recipient"] = recipient
+        captured["subject"] = subject
+        captured["text_body"] = text_body
+        captured["html_body"] = html_body
+        return True
+
+    monkeypatch.setattr("app.send_smtp_email", fake_send_smtp_email)
+
+    assert send_unused_benefit_reminder_email(member) is True
+    assert "Complete Your Membership Setup" in captured["html_body"]
+    assert "Register My Vehicle" in captured["html_body"]
+    assert f"/m/{member.token}/vehicle/register" in captured["html_body"]
+    assert "Registration Required" in captured["html_body"]
