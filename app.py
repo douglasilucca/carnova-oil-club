@@ -1677,11 +1677,11 @@ def stripe_webhook():
 
     event_type = event.get("type")
     obj = event["data"]["object"]
-    membership_email_member = None
+    member = None
 
     try:
         if event_type == "checkout.session.completed":
-            membership_email_member, _was_created = process_checkout_completed(obj)
+            member, _was_created = process_checkout_completed(obj)
         elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
             process_invoice_payment_succeeded(obj)
         elif event_type == "invoice.payment_failed":
@@ -1706,9 +1706,9 @@ def stripe_webhook():
         print("Stripe webhook processing error:", error)
         return "Webhook processing failed", 500
 
-    if membership_email_member:
+    if member:
         print("MEMBERSHIP EMAIL TRIGGERED")
-        if not send_membership_confirmation_email(membership_email_member):
+        if not send_membership_confirmation_email(member):
             print("MEMBERSHIP EMAIL FAILED")
 
     return "", 200
