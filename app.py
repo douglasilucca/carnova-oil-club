@@ -1191,25 +1191,106 @@ def send_membership_confirmation_email(member):
     message["Subject"] = "Welcome to Carnova Oil Club"
     message["From"] = sender
     message["To"] = member.email
+    public_card_url = member_public_url(member)
+    expiration_text = member.expiration_date.strftime('%B %d, %Y')
 
-    message.set_content(f"""
-Hello {member.name},
+    message.set_content(f"""Hello {member.name},
 
-Thank you for joining Carnova Oil Club!
+Thank you for joining Carnova Oil Club.
 
-Membership ID: {member.member_id}
-Plan: {member.plan_name}
-Oil Changes Included: {member.total_changes}
-Remaining Oil Changes: {member.remaining_changes}
-Expiration Date: {member.expiration_date.strftime('%B %d, %Y')}
+Membership Details
+- Customer Name: {member.name}
+- Membership ID: {member.member_id}
+- Plan Name: {member.plan_name}
+- Total Oil Changes: {member.total_changes}
+- Remaining Oil Changes: {member.remaining_changes}
+- Expiration Date: {expiration_text}
 
-Thank you for choosing Carnova!
+View your digital membership card:
+{public_card_url}
+
+On your membership page, you can view your membership status, remaining oil changes, registered vehicle, expiration date, QR code, and service history.
+
+Please save this email and add your membership page to your phone home screen for quick access.
 
 Carnova of Southborough
 251 Turnpike Rd
 Southborough, MA 01772
 Phone: (978) 258-0029
 """)
+
+    message.add_alternative(
+    f"""<!DOCTYPE html>
+<html lang=\"en\">
+<body style=\"margin:0;padding:0;background-color:#f4f6f8;font-family:Arial,Helvetica,sans-serif;color:#1f2937;\">
+    <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color:#f4f6f8;padding:20px 12px;\">
+        <tr>
+            <td align=\"center\">
+                <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"max-width:600px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;\">
+                    <tr>
+                        <td style=\"background:#0f172a;color:#ffffff;padding:22px 24px;\">
+                            <h1 style=\"margin:0;font-size:22px;line-height:1.3;font-weight:700;\">Welcome to Carnova Oil Club</h1>
+                            <p style=\"margin:8px 0 0;font-size:14px;line-height:1.5;color:#cbd5e1;\">Your membership is active and ready to use.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style=\"padding:24px;\">
+                            <p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;\">Hello {member.name},</p>
+                            <p style=\"margin:0 0 18px;font-size:15px;line-height:1.6;\">Thank you for joining Carnova Oil Club. Here are your membership details:</p>
+
+                            <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;margin:0 0 20px;\">
+                                <tr>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:600;width:45%;\">Customer Name</td>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;\">{member.name}</td>
+                                </tr>
+                                <tr>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:600;\">Membership ID</td>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;\">{member.member_id}</td>
+                                </tr>
+                                <tr>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:600;\">Plan Name</td>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;\">{member.plan_name}</td>
+                                </tr>
+                                <tr>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:600;\">Total Oil Changes</td>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;\">{member.total_changes}</td>
+                                </tr>
+                                <tr>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:600;\">Remaining Oil Changes</td>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;\">{member.remaining_changes}</td>
+                                </tr>
+                                <tr>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;font-weight:600;\">Expiration Date</td>
+                                    <td style=\"padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;\">{expiration_text}</td>
+                                </tr>
+                            </table>
+
+                            <table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" style=\"margin:0 0 18px;\">
+                                <tr>
+                                    <td align=\"center\" style=\"border-radius:8px;background:#0ea5e9;\">
+                                        <a href=\"{public_card_url}\" style=\"display:inline-block;padding:14px 22px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;\">View My Digital Membership Card</a>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p style=\"margin:0 0 10px;font-size:14px;line-height:1.7;\">Your membership page lets you view your membership status, remaining oil changes, registered vehicle, expiration date, QR code, and service history.</p>
+                            <p style=\"margin:0 0 20px;font-size:14px;line-height:1.7;\">Please save this email and add your membership page to your phone home screen for quick access anytime.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style=\"padding:18px 24px;background:#f8fafc;border-top:1px solid #e5e7eb;\">
+                            <p style=\"margin:0;font-size:14px;font-weight:700;color:#111827;\">Carnova of Southborough</p>
+                            <p style=\"margin:6px 0 0;font-size:13px;line-height:1.6;color:#4b5563;\">251 Turnpike Rd<br>Southborough, MA 01772<br>Phone: (978) 258-0029</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>""",
+        subtype="html",
+    )
 
     try:
         port = int(os.environ.get("SMTP_PORT", "587"))
@@ -1223,6 +1304,17 @@ Phone: (978) 258-0029
     except Exception as e:
         print("EMAIL ERROR:", e)
         return False
+
+
+def member_public_url(member):
+    path = url_for("member_public", token=member.token)
+    if has_request_context():
+        return request.url_root.rstrip("/") + path
+
+    base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if base_url:
+        return f"{base_url}{path}"
+    return path
 
 MONTHLY_PRICE_ID = "price_1TxtO7R1GwRFNmYeGo3km5vf"
 MONTHLY_PRICE_ID_ALT = "price_1Txt07R1GwRFNmYeGo3km5vf"
