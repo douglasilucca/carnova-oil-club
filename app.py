@@ -1307,14 +1307,7 @@ Phone: (978) 258-0029
 
 
 def member_public_url(member):
-    path = url_for("member_public", token=member.token)
-    if has_request_context():
-        return request.url_root.rstrip("/") + path
-
-    base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if base_url:
-        return f"{base_url}{path}"
-    return path
+    return f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}"
 
 MONTHLY_PRICE_ID = "price_1TxtO7R1GwRFNmYeGo3km5vf"
 MONTHLY_PRICE_ID_ALT = "price_1Txt07R1GwRFNmYeGo3km5vf"
@@ -1684,13 +1677,11 @@ def stripe_webhook():
 
     event_type = event.get("type")
     obj = event["data"]["object"]
-    new_member = None
+    membership_email_member = None
 
     try:
         if event_type == "checkout.session.completed":
-            new_member, was_created = process_checkout_completed(obj)
-            if not was_created:
-                new_member = None
+            membership_email_member, _was_created = process_checkout_completed(obj)
         elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
             process_invoice_payment_succeeded(obj)
         elif event_type == "invoice.payment_failed":
@@ -1715,8 +1706,10 @@ def stripe_webhook():
         print("Stripe webhook processing error:", error)
         return "Webhook processing failed", 500
 
-    if new_member:
-        send_membership_confirmation_email(new_member)
+    if membership_email_member:
+        print("MEMBERSHIP EMAIL TRIGGERED")
+        if not send_membership_confirmation_email(membership_email_member):
+            print("MEMBERSHIP EMAIL FAILED")
 
     return "", 200
 
