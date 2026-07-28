@@ -9,7 +9,14 @@
     <div class="remaining-number">{{ member.remaining_changes }}</div>
     <p>premium full synthetic oil changes remaining</p>
     <div class="progress"><span style="width: {{ (member.remaining_changes / member.total_changes * 100) if member.total_changes else 0 }}%"></span></div>
-    <div class="card-meta three"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Plan<br><strong>{{ member.plan_name or 'Prepaid Package' }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
+    <div class="member-card-bottom">
+      <div class="card-meta three"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Plan<br><strong>{{ member.plan_name or 'Prepaid Package' }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
+      <div class="card-qr">
+        <img src="{{ url_for('member_qr', member_id=member.member_id) }}"
+             alt="QR code for membership verification">
+        <p>Scan to verify membership</p>
+      </div>
+    </div>
   </article>
 
 
