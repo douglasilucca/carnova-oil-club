@@ -15,6 +15,11 @@
     {% endif %}
     <a class="button secondary" href="{{ url_for('member_qr', member_id=member.member_id) }}">Download QR</a>
     <a class="button secondary" href="{{ url_for('edit_member', member_id=member.member_id) }}">Edit Member</a>
+    {% if can_access_billing_portal(member) %}
+    <form method="post" action="{{ url_for('member_billing_portal', member_id=member.member_id) }}" style="display:inline-block;">
+      <button class="button primary" type="submit">Manage Subscription</button>
+    </form>
+    {% endif %}
   </div>
 </div>
 

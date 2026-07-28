@@ -251,7 +251,69 @@ def is_monthly_membership(member):
     return False
 
 
+def is_monthly_membership_customer(member):
+    if not member:
+        return False
+
+    normalized_plan = normalize_plan_name(getattr(member, "plan_name", None))
+    if normalized_plan in {"monthly membership", "carnova monthly membership"}:
+        return True
+
+    stripe_price_id = getattr(member, "stripe_price_id", None)
+    if stripe_price_id in MONTHLY_PRICE_IDS:
+        return True
+
+    return False
+
+
+def can_access_billing_portal(member):
+    if not member:
+        return False
+    if not is_monthly_membership_customer(member):
+        return False
+    return bool(getattr(member, "stripe_customer_id", None))
+
+
+def create_billing_portal_session(member, return_url):
+    if not member:
+        flash("That member could not be found.", "error")
+        return None
+
+    if not is_monthly_membership_customer(member):
+        flash("The billing portal is only available for Monthly Membership customers.", "error")
+        return None
+
+    if not getattr(member, "stripe_customer_id", None):
+        flash("This member is not connected to Stripe yet, so the billing portal is unavailable.", "error")
+        return None
+
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
+    if not stripe_secret:
+        flash("Stripe is not configured for billing portal access right now.", "error")
+        return None
+
+    stripe.api_key = stripe_secret
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=member.stripe_customer_id,
+            return_url=return_url,
+        )
+    except stripe.error.StripeError as error:
+        print("Stripe billing portal error:", error)
+        flash("We couldn't open the billing portal right now. Please try again later.", "error")
+        return None
+
+    session_url = session.get("url")
+    if not session_url or not session_url.startswith("https://billing.stripe.com/"):
+        flash("We couldn't open the billing portal right now. Please try again later.", "error")
+        return None
+
+    return session_url
+
+
 app.jinja_env.globals["is_monthly_membership"] = is_monthly_membership
+app.jinja_env.globals["is_monthly_membership_customer"] = is_monthly_membership_customer
+app.jinja_env.globals["can_access_billing_portal"] = can_access_billing_portal
 
 
 def current_member_status(member):
@@ -524,6 +586,35 @@ def new_member():
         return redirect(url_for("member_detail", member_id=member.member_id))
 
     return render_template("member_form.html")
+
+
+@app.route("/members/<member_id>/billing/portal", methods=["POST"])
+@login_required
+def member_billing_portal(member_id):
+    member = Member.query.filter_by(member_id=member_id).first()
+    if not member:
+        flash("That member could not be found.", "error")
+        return redirect(url_for("dashboard"))
+
+    return_url = request.url_root.rstrip("/") + url_for("member_detail", member_id=member.member_id)
+    session_url = create_billing_portal_session(member, return_url)
+    if session_url:
+        return redirect(session_url)
+    return redirect(url_for("member_detail", member_id=member.member_id))
+
+
+@app.route("/m/<token>/billing/portal", methods=["POST"])
+def public_member_billing_portal(token):
+    member = Member.query.filter_by(token=token).first()
+    if not member:
+        flash("That member could not be found.", "error")
+        return redirect(url_for("login"))
+
+    return_url = request.url_root.rstrip("/") + url_for("member_public", token=member.token)
+    session_url = create_billing_portal_session(member, return_url)
+    if session_url:
+        return redirect(session_url)
+    return redirect(url_for("member_public", token=member.token))
 
 
 @app.route("/members/<member_id>")
@@ -1282,6 +1373,16 @@ def process_checkout_completed(obj):
     stripe_secret = os.environ.get("STRIPE_SECRET_KEY")
     if stripe_secret:
         stripe.api_key = stripe_secret
+
+    # Some checkout payloads can omit customer/subscription IDs.
+    # Recover them directly from Stripe so portal access fields are persisted.
+    if stripe_secret and (not customer_id or (obj.get("mode") == "subscription" and not subscription_id)):
+        try:
+            checkout_session = stripe.checkout.Session.retrieve(obj.get("id"))
+            customer_id = customer_id or stripe_object_id(checkout_session.get("customer"))
+            subscription_id = subscription_id or stripe_object_id(checkout_session.get("subscription"))
+        except Exception as error:
+            print("Error retrieving Stripe checkout session:", error)
 
     if customer_id and stripe_secret and (not customer_name or not customer_phone):
         try:

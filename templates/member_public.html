@@ -19,7 +19,14 @@
       <h2>Schedule Your Next Oil Change</h2>
       <p class="muted">Choose an available time online. No phone call required.</p>
     </div>
-    <a class="button primary" href="{{ url_for('public_new_appointment', token=member.token) }}">Schedule Service</a>
+    <div class="actions">
+      <a class="button primary" href="{{ url_for('public_new_appointment', token=member.token) }}">Schedule Service</a>
+      {% if can_access_billing_portal(member) %}
+      <form method="post" action="{{ url_for('public_member_billing_portal', token=member.token) }}" style="display:inline-block;">
+        <button class="button secondary" type="submit">Manage Subscription</button>
+      </form>
+      {% endif %}
+    </div>
   </section>
 
   {% if upcoming_appointments %}

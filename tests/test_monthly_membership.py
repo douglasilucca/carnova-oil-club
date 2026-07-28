@@ -3,6 +3,7 @@ import os
 from datetime import date, timedelta
 
 import pytest
+import stripe
 
 from app import Member, Vehicle, current_member_status, db, monthly_membership_defaults
 from app import app as flask_app
@@ -163,6 +164,202 @@ def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_butt
     assert b"+ Add Vehicle" not in member_detail_response.data
 
 
+def test_portal_session_is_created_for_monthly_member(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Portal User",
+            email="portal@example.com",
+            member_id="COC-00006",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="portal-token",
+            plan_name="Monthly Membership",
+            stripe_customer_id="cus_portal",
+            stripe_subscription_id="sub_portal",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    login_response = client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+    assert login_response.status_code == 200
+
+    created = {}
+
+    def fake_create(**kwargs):
+        created.update(kwargs)
+        return {"url": "https://billing.stripe.com/session"}
+
+    monkeypatch.setattr("app.stripe.billing_portal.Session.create", fake_create)
+
+    response = client.post(f"/members/{member_id}/billing/portal", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "https://billing.stripe.com/session"
+    assert created["customer"] == "cus_portal"
+    assert created["return_url"].endswith(f"/members/{member_id}")
+
+
+def test_portal_session_rejected_without_stripe_customer_id(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Portal User",
+            email="portal-missing@example.com",
+            member_id="COC-00007",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="portal-token-missing",
+            plan_name="Monthly Membership",
+            stripe_subscription_id="sub_portal_missing",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    create_called = {"value": False}
+
+    def fake_create(**kwargs):
+        create_called["value"] = True
+        return {"url": "https://billing.stripe.com/session"}
+
+    monkeypatch.setattr("app.stripe.billing_portal.Session.create", fake_create)
+
+    response = client.post(f"/members/{member_id}/billing/portal", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert create_called["value"] is False
+    assert b"not connected to stripe yet" in response.data.lower()
+
+
+def test_portal_session_rejected_for_non_monthly_plan(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Bronze User",
+            email="bronze@example.com",
+            member_id="COC-00008",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="bronze-token",
+            plan_name="Bronze",
+            stripe_customer_id="cus_bronze",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    create_called = {"value": False}
+
+    def fake_create(**kwargs):
+        create_called["value"] = True
+        return {"url": "https://billing.stripe.com/session"}
+
+    monkeypatch.setattr("app.stripe.billing_portal.Session.create", fake_create)
+
+    response = client.post(f"/members/{member_id}/billing/portal", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert create_called["value"] is False
+    assert b"monthly membership" in response.data.lower()
+
+
+def test_portal_session_handles_stripe_api_error(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Portal Error",
+            email="portal-error@example.com",
+            member_id="COC-00009",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="portal-error-token",
+            plan_name="Monthly Membership",
+            stripe_customer_id="cus_error",
+            stripe_subscription_id="sub_error",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    def fake_create(**kwargs):
+        raise stripe.error.StripeError("boom")
+
+    monkeypatch.setattr("app.stripe.billing_portal.Session.create", fake_create)
+
+    response = client.post(f"/members/{member_id}/billing/portal", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"billing portal right now" in response.data.lower()
+
+
+@pytest.mark.parametrize("plan_name", ["Bronze", "Silver", "Gold"])
+def test_bronze_silver_gold_plans_do_not_create_portal_sessions(client, monkeypatch, plan_name):
+    with flask_app.app_context():
+        member = Member(
+            name=plan_name,
+            email=f"{plan_name.lower()}@example.com",
+            member_id=f"COC-0001{['0', '1', '2'][['Bronze', 'Silver', 'Gold'].index(plan_name)]}",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token=f"{plan_name.lower()}-token",
+            plan_name=plan_name,
+            stripe_customer_id="cus_plan",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    create_called = {"value": False}
+
+    def fake_create(**kwargs):
+        create_called["value"] = True
+        return {"url": "https://billing.stripe.com/session"}
+
+    monkeypatch.setattr("app.stripe.billing_portal.Session.create", fake_create)
+
+    response = client.post(f"/members/{member_id}/billing/portal", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert create_called["value"] is False
+    assert b"monthly membership" in response.data.lower()
+
+
 def test_current_member_status_blocks_past_due_and_cancelled_members():
     member = Member(
         name="Test",
@@ -218,6 +415,68 @@ def test_checkout_session_completed_creates_monthly_member(client, monkeypatch):
     assert member.subscription_status == "active"
     assert member.total_changes == 3
     assert member.remaining_changes == 3
+
+
+def test_checkout_session_recovers_missing_customer_id_for_portal_access(client, monkeypatch):
+    def fake_construct_event(payload, signature, secret):
+        return {"id": "evt_checkout_recover", "type": "checkout.session.completed", "data": {"object": {
+            "id": "cs_recover",
+            "mode": "subscription",
+            "customer": None,
+            "subscription": None,
+            "payment_intent": "pi_recover",
+            "customer_details": {"email": "recover@example.com", "name": "Recover Customer"},
+            "amount_total": 2000,
+            "metadata": {},
+            "shipping_details": {},
+        }}}
+
+    class FakeCheckoutSession:
+        @staticmethod
+        def list_line_items(session_id, limit=1, expand=None):
+            return {"data": [{"price": {"id": "price_1Txt07R1GwRFNmYeGo3km5vf"}}]}
+
+        @staticmethod
+        def retrieve(session_id):
+            return {"customer": "cus_recovered", "subscription": "sub_recovered"}
+
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", fake_construct_event)
+    monkeypatch.setattr("app.stripe.checkout.Session", FakeCheckoutSession)
+
+    webhook_response = client.post(
+        "/stripe/webhook",
+        data=json.dumps({"test": True}),
+        headers={"Stripe-Signature": "test-signature"},
+    )
+    assert webhook_response.status_code == 200
+
+    with flask_app.app_context():
+        member = Member.query.filter_by(email="recover@example.com").first()
+        assert member is not None
+        assert member.plan_name == "Monthly Membership"
+        assert member.stripe_customer_id == "cus_recovered"
+        assert member.stripe_subscription_id == "sub_recovered"
+        member_id = member.member_id
+
+    login_response = client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+    assert login_response.status_code == 200
+
+    created = {}
+
+    def fake_portal_create(**kwargs):
+        created.update(kwargs)
+        return {"url": "https://billing.stripe.com/session"}
+
+    monkeypatch.setattr("app.stripe.billing_portal.Session.create", fake_portal_create)
+
+    portal_response = client.post(f"/members/{member_id}/billing/portal", follow_redirects=False)
+    assert portal_response.status_code == 302
+    assert portal_response.headers["Location"] == "https://billing.stripe.com/session"
+    assert created["customer"] == "cus_recovered"
 
 
 def test_subscription_updated_marks_member_past_due(client, monkeypatch):
