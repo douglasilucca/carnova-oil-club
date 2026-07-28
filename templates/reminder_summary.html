@@ -30,6 +30,104 @@
     </table>
   </div>
 
+  <section class="panel" style="margin-top:16px;">
+    <p class="eyebrow">SKIP DETAILS</p>
+    <h2>Renewal reminders</h2>
+    {% set renewal_reason_labels = {
+      'outside_reminder_window': 'outside the 30/7/1-day window',
+      'inactive_member': 'inactive members',
+      'missing_expiration_date': 'missing expiration date',
+      'duplicate_reminder': 'duplicate reminders',
+      'missing_email': 'missing email addresses'
+    } %}
+    {% set renewal_nonzero = namespace(count=0) %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+        <tbody>
+          {% for reason_key, label in renewal_reason_labels.items() %}
+            {% set reason_count = summary.renewal.skip_reasons.get(reason_key, 0) %}
+            {% if reason_count > 0 %}
+              {% set renewal_nonzero.count = renewal_nonzero.count + 1 %}
+              <tr><td>{{ label }}</td><td>{{ reason_count }}</td></tr>
+            {% endif %}
+          {% endfor %}
+          {% if renewal_nonzero.count == 0 %}
+            <tr><td colspan="2" class="empty">No renewal skips recorded.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2 style="margin-top:18px;">Unused-benefit reminders</h2>
+    {% set unused_reason_labels = {
+      'inactive_member': 'inactive members',
+      'zero_remaining_changes': 'members with no remaining oil changes',
+      'used_within_last_120_days': 'have used service within the last 120 days',
+      'reminder_sent_within_90_days': 'had a reminder within the last 90 days',
+      'missing_email': 'missing email addresses'
+    } %}
+    {% set unused_nonzero = namespace(count=0) %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+        <tbody>
+          {% for reason_key, label in unused_reason_labels.items() %}
+            {% set reason_count = summary.unused_benefit.skip_reasons.get(reason_key, 0) %}
+            {% if reason_count > 0 %}
+              {% set unused_nonzero.count = unused_nonzero.count + 1 %}
+              <tr><td>{{ label }}</td><td>{{ reason_count }}</td></tr>
+            {% endif %}
+          {% endfor %}
+          {% if unused_nonzero.count == 0 %}
+            <tr><td colspan="2" class="empty">No unused-benefit skips recorded.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-top:16px;">
+    <p class="eyebrow">RESULTS</p>
+    <h2>Eligible reminders sent</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Member</th><th>Reminder Type</th><th>Email</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for item in summary.sent_details %}
+            <tr>
+              <td>{{ item.member_name }}</td>
+              <td>{{ item.reminder_type|replace('_', ' ')|title }}</td>
+              <td>{{ item.email }}</td>
+              <td>{{ item.status|title }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="empty">No reminders were sent in this run.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2 style="margin-top:18px;">Failed reminders</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Member</th><th>Reminder Type</th><th>Email</th><th>Error Message</th></tr></thead>
+        <tbody>
+          {% for item in summary.failed_details %}
+            <tr>
+              <td>{{ item.member_name }}</td>
+              <td>{{ item.reminder_type|replace('_', ' ')|title }}</td>
+              <td>{{ item.email }}</td>
+              <td>{{ item.error }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="empty">No reminder failures in this run.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <div class="actions" style="margin-top:16px;">
     <a class="button secondary" href="{{ url_for('dashboard') }}">Back to Dashboard</a>
   </div>

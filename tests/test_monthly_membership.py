@@ -13,6 +13,7 @@ from app import (
     current_member_status,
     db,
     monthly_membership_defaults,
+    run_all_reminders,
     run_renewal_reminders,
     run_unused_benefit_reminders,
     send_unused_benefit_reminder_email,
@@ -1004,3 +1005,95 @@ def test_unused_benefit_email_without_vehicle_uses_register_cta(client, monkeypa
     assert "Register My Vehicle" in captured["html_body"]
     assert f"/m/{member.token}/vehicle/register" in captured["html_body"]
     assert "Registration Required" in captured["html_body"]
+
+
+def test_renewal_outside_window_increments_skip_reason(client, monkeypatch):
+    today = date.today()
+    _create_member_for_reminders("renewal-outside@example.com", expiration_days=20)
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_renewal_reminders(reference_date=today)
+
+    assert summary["sent"] == 0
+    assert summary["skip_reasons"]["outside_reminder_window"] == 1
+    assert summary["skipped"] == 1
+
+
+def test_inactive_renewal_member_increments_skip_reason(client, monkeypatch):
+    today = date.today()
+    _create_member_for_reminders("renewal-inactive@example.com", expiration_days=30, status="cancelled")
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_renewal_reminders(reference_date=today)
+
+    assert summary["sent"] == 0
+    assert summary["skip_reasons"]["inactive_member"] == 1
+    assert summary["skipped"] == 1
+
+
+def test_unused_benefit_recent_redemption_increments_skip_reason(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("unused-recent@example.com", expiration_days=180)
+    db.session.add(
+        Redemption(
+            member_id=member.id,
+            redeemed_at=datetime.combine(today - timedelta(days=20), datetime.min.time()),
+            vehicle="Recent Vehicle",
+            mileage="41000",
+        )
+    )
+    db.session.commit()
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_unused_benefit_reminders(reference_date=today)
+
+    assert summary["sent"] == 0
+    assert summary["skip_reasons"]["used_within_last_120_days"] == 1
+    assert summary["skipped"] == 1
+
+
+def test_unused_benefit_90_day_cooldown_increments_skip_reason(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("unused-cooldown@example.com", expiration_days=180)
+    db.session.add(
+        ReminderLog(
+            member_id=member.id,
+            reminder_type="unused_benefit",
+            reminder_key="unused-benefit:existing",
+            sent_at=datetime.combine(today - timedelta(days=20), datetime.min.time()),
+        )
+    )
+    db.session.commit()
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_unused_benefit_reminders(reference_date=today)
+
+    assert summary["sent"] == 0
+    assert summary["skip_reasons"]["reminder_sent_within_90_days"] == 1
+    assert summary["skipped"] == 1
+
+
+def test_zero_remaining_changes_increments_skip_reason(client, monkeypatch):
+    _create_member_for_reminders("unused-zero-reason@example.com", expiration_days=180, remaining_changes=0, total_changes=3)
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_unused_benefit_reminders(reference_date=date.today())
+
+    assert summary["sent"] == 0
+    assert summary["skip_reasons"]["zero_remaining_changes"] == 1
+    assert summary["skipped"] == 1
+
+
+def test_reminder_summary_totals_match_reason_counts(client, monkeypatch):
+    today = date.today()
+    _create_member_for_reminders("totals-outside@example.com", expiration_days=20)
+    _create_member_for_reminders("totals-zero@example.com", expiration_days=180, remaining_changes=0, total_changes=3)
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_all_reminders(reference_date=today)
+
+    assert summary["renewal"]["skipped"] == sum(summary["renewal"]["skip_reasons"].values())
+    assert summary["unused_benefit"]["skipped"] == sum(summary["unused_benefit"]["skip_reasons"].values())
+    assert summary["sent"] == summary["renewal"]["sent"] + summary["unused_benefit"]["sent"]
+    assert summary["failed"] == summary["renewal"]["failed"] + summary["unused_benefit"]["failed"]
+    assert summary["skipped"] == summary["renewal"]["skipped"] + summary["unused_benefit"]["skipped"]

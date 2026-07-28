@@ -649,26 +649,95 @@ Email: info@carnovaoil.com
 
 def run_renewal_reminders(reference_date=None):
     today = reference_date or date.today()
-    summary = {"sent": 0, "skipped": 0, "failed": 0}
+    summary = {
+        "sent": 0,
+        "skipped": 0,
+        "failed": 0,
+        "skip_reasons": {
+            "outside_reminder_window": 0,
+            "inactive_member": 0,
+            "missing_expiration_date": 0,
+            "duplicate_reminder": 0,
+            "missing_email": 0,
+        },
+        "sent_details": [],
+        "failed_details": [],
+    }
     renewal_offsets = {30, 7, 1}
 
-    active_members = Member.query.filter_by(status="active").all()
-    for member in active_members:
+    def mark_skip(reason):
+        summary["skipped"] += 1
+        summary["skip_reasons"][reason] += 1
+
+    for member in Member.query.all():
+        if member.status != "active":
+            mark_skip("inactive_member")
+            continue
+
+        if not member.expiration_date:
+            mark_skip("missing_expiration_date")
+            continue
+
         days_until_expiration = (member.expiration_date - today).days
         if days_until_expiration not in renewal_offsets:
+            mark_skip("outside_reminder_window")
+            continue
+
+        if not member.email:
+            mark_skip("missing_email")
             continue
 
         reminder_key = f"renewal:{member.expiration_date.isoformat()}:{days_until_expiration}"
         if reminder_already_sent(member.id, "renewal", reminder_key):
-            summary["skipped"] += 1
+            mark_skip("duplicate_reminder")
             continue
 
-        if send_renewal_reminder_email(member, days_until_expiration):
-            remember_sent_reminder(member.id, "renewal", reminder_key)
+        failure_message = None
+        try:
+            email_sent = send_renewal_reminder_email(member, days_until_expiration)
+        except Exception as error:
+            email_sent = False
+            failure_message = str(error)
+
+        if email_sent:
+            try:
+                remember_sent_reminder(member.id, "renewal", reminder_key)
+            except Exception as error:
+                db.session.rollback()
+                summary["failed"] += 1
+                summary["failed_details"].append(
+                    {
+                        "member_name": member.name,
+                        "reminder_type": "renewal",
+                        "email": member.email,
+                        "status": "failed",
+                        "error": f"Could not record reminder log: {error}",
+                    }
+                )
+                print("REMINDER FAILED", member.member_id)
+                continue
+
             summary["sent"] += 1
+            summary["sent_details"].append(
+                {
+                    "member_name": member.name,
+                    "reminder_type": "renewal",
+                    "email": member.email,
+                    "status": "sent",
+                }
+            )
             print("RENEWAL REMINDER SENT", member.member_id)
         else:
             summary["failed"] += 1
+            summary["failed_details"].append(
+                {
+                    "member_name": member.name,
+                    "reminder_type": "renewal",
+                    "email": member.email,
+                    "status": "failed",
+                    "error": failure_message or "Email send returned False",
+                }
+            )
             print("REMINDER FAILED", member.member_id)
 
     return summary
@@ -676,17 +745,38 @@ def run_renewal_reminders(reference_date=None):
 
 def run_unused_benefit_reminders(reference_date=None):
     today = reference_date or date.today()
-    summary = {"sent": 0, "skipped": 0, "failed": 0}
+    summary = {
+        "sent": 0,
+        "skipped": 0,
+        "failed": 0,
+        "skip_reasons": {
+            "inactive_member": 0,
+            "zero_remaining_changes": 0,
+            "used_within_last_120_days": 0,
+            "reminder_sent_within_90_days": 0,
+            "missing_email": 0,
+        },
+        "sent_details": [],
+        "failed_details": [],
+    }
     inactive_cutoff = datetime.combine(today - timedelta(days=120), time.max)
     resend_cutoff = datetime.combine(today - timedelta(days=90), time.min)
 
+    def mark_skip(reason):
+        summary["skipped"] += 1
+        summary["skip_reasons"][reason] += 1
+
     for member in Member.query.all():
         if member.status != "active":
-            summary["skipped"] += 1
+            mark_skip("inactive_member")
             continue
 
         if member.remaining_changes <= 0:
-            summary["skipped"] += 1
+            mark_skip("zero_remaining_changes")
+            continue
+
+        if not member.email:
+            mark_skip("missing_email")
             continue
 
         latest_redemption = (
@@ -696,7 +786,7 @@ def run_unused_benefit_reminders(reference_date=None):
         )
 
         if latest_redemption and latest_redemption.redeemed_at > inactive_cutoff:
-            summary["skipped"] += 1
+            mark_skip("used_within_last_120_days")
             continue
 
         recent_unused = (
@@ -705,20 +795,60 @@ def run_unused_benefit_reminders(reference_date=None):
             .first()
         )
         if recent_unused:
-            summary["skipped"] += 1
+            mark_skip("reminder_sent_within_90_days")
             continue
 
         reminder_key = f"unused-benefit:{today.toordinal() // 90}"
         if reminder_already_sent(member.id, "unused_benefit", reminder_key):
-            summary["skipped"] += 1
+            mark_skip("reminder_sent_within_90_days")
             continue
 
-        if send_unused_benefit_reminder_email(member):
-            remember_sent_reminder(member.id, "unused_benefit", reminder_key)
+        failure_message = None
+        try:
+            email_sent = send_unused_benefit_reminder_email(member)
+        except Exception as error:
+            email_sent = False
+            failure_message = str(error)
+
+        if email_sent:
+            try:
+                remember_sent_reminder(member.id, "unused_benefit", reminder_key)
+            except Exception as error:
+                db.session.rollback()
+                summary["failed"] += 1
+                summary["failed_details"].append(
+                    {
+                        "member_name": member.name,
+                        "reminder_type": "unused_benefit",
+                        "email": member.email,
+                        "status": "failed",
+                        "error": f"Could not record reminder log: {error}",
+                    }
+                )
+                print("REMINDER FAILED", member.member_id)
+                continue
+
             summary["sent"] += 1
+            summary["sent_details"].append(
+                {
+                    "member_name": member.name,
+                    "reminder_type": "unused_benefit",
+                    "email": member.email,
+                    "status": "sent",
+                }
+            )
             print("UNUSED BENEFIT REMINDER SENT", member.member_id)
         else:
             summary["failed"] += 1
+            summary["failed_details"].append(
+                {
+                    "member_name": member.name,
+                    "reminder_type": "unused_benefit",
+                    "email": member.email,
+                    "status": "failed",
+                    "error": failure_message or "Email send returned False",
+                }
+            )
             print("REMINDER FAILED", member.member_id)
 
     return summary
@@ -734,6 +864,8 @@ def run_all_reminders(reference_date=None):
         "failed": renewal_summary["failed"] + unused_summary["failed"],
         "renewal": renewal_summary,
         "unused_benefit": unused_summary,
+        "sent_details": renewal_summary["sent_details"] + unused_summary["sent_details"],
+        "failed_details": renewal_summary["failed_details"] + unused_summary["failed_details"],
     }
 
 
