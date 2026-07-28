@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Reminder Run Summary | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="panel" style="max-width:760px;margin:0 auto;">
+  <p class="eyebrow">AUTOMATION</p>
+  <h1>Reminder Run Summary</h1>
+  <div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:18px;">
+    <article><span>Sent</span><strong>{{ summary.sent }}</strong></article>
+    <article><span>Skipped</span><strong>{{ summary.skipped }}</strong></article>
+    <article><span>Failed</span><strong>{{ summary.failed }}</strong></article>
+  </div>
+
+  <div class="table-wrap" style="margin-top:8px;">
+    <table>
+      <thead><tr><th>Reminder Type</th><th>Sent</th><th>Skipped</th><th>Failed</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Renewal</td>
+          <td>{{ summary.renewal.sent }}</td>
+          <td>{{ summary.renewal.skipped }}</td>
+          <td>{{ summary.renewal.failed }}</td>
+        </tr>
+        <tr>
+          <td>Unused Benefit</td>
+          <td>{{ summary.unused_benefit.sent }}</td>
+          <td>{{ summary.unused_benefit.skipped }}</td>
+          <td>{{ summary.unused_benefit.failed }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="actions" style="margin-top:16px;">
+    <a class="button secondary" href="{{ url_for('dashboard') }}">Back to Dashboard</a>
+  </div>
+</section>
+{% endblock %}

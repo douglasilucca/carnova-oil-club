@@ -6,6 +6,9 @@
   <div class="actions">
     <a class="button dark" href="{{ url_for('scan_qr') }}">▣ Scan QR</a>
     <a class="button secondary" href="{{ url_for('export_members') }}">Export Members</a>
+    <form method="post" action="{{ url_for('run_reminders_now') }}" style="display:inline-block;">
+      <button class="button ghost" type="submit">Run Reminders Now</button>
+    </form>
     <a class="button primary" href="{{ url_for('new_member') }}">+ New Member</a>
   </div>
 </div>

@@ -10,7 +10,7 @@ import qrcode
 import stripe
 from flask import Flask, Response, flash, has_request_context, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect, text
+from sqlalchemy import UniqueConstraint, inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
@@ -68,6 +68,20 @@ class StripeEvent(db.Model):
     event_id = db.Column(db.String(255), unique=True, nullable=False, index=True)
     event_type = db.Column(db.String(100), nullable=False)
     processed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
+class ReminderLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False, index=True)
+    reminder_type = db.Column(db.String(50), nullable=False, index=True)
+    reminder_key = db.Column(db.String(100), nullable=False, index=True)
+    sent_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("member_id", "reminder_type", "reminder_key", name="uq_reminder_member_type_key"),
+    )
+
+    member = db.relationship("Member", backref=db.backref("reminder_logs", lazy=True, cascade="all, delete-orphan"))
 
 
 class Vehicle(db.Model):
@@ -434,6 +448,215 @@ Carnova of Southborough
         return False
 
 
+def send_smtp_email(recipient, subject, text_body, html_body=None):
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM_EMAIL", smtp_user or "")
+
+    if not all([smtp_host, smtp_user, smtp_password, sender, recipient]):
+        print("EMAIL ERROR: Missing SMTP configuration")
+        return False
+
+    import smtplib
+    from email.message import EmailMessage
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(text_body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
+
+    try:
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        with smtplib.SMTP(smtp_host, port, timeout=15) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(message)
+        return True
+    except Exception as error:
+        print("EMAIL ERROR:", error)
+        return False
+
+
+def reminder_already_sent(member_id, reminder_type, reminder_key):
+    return ReminderLog.query.filter_by(
+        member_id=member_id,
+        reminder_type=reminder_type,
+        reminder_key=reminder_key,
+    ).first() is not None
+
+
+def remember_sent_reminder(member_id, reminder_type, reminder_key):
+    db.session.add(
+        ReminderLog(
+            member_id=member_id,
+            reminder_type=reminder_type,
+            reminder_key=reminder_key,
+        )
+    )
+    db.session.commit()
+
+
+def send_renewal_reminder_email(member, days_until_expiration):
+    with app.test_request_context("/"):
+        public_card_url = member_public_url(member)
+    expiration_text = member.expiration_date.strftime("%B %d, %Y")
+    subject = f"Carnova Oil Club Renewal Reminder - {days_until_expiration} Day{'s' if days_until_expiration != 1 else ''} Left"
+    text_body = f"""Hello {member.name},
+
+Your Carnova Oil Club membership is nearing renewal.
+
+Plan: {member.plan_name or 'Prepaid Package'}
+Expiration Date: {expiration_text}
+Remaining Oil Changes: {member.remaining_changes}
+
+View your digital membership card:
+{public_card_url}
+"""
+    html_body = f"""<!DOCTYPE html>
+<html lang=\"en\">
+  <body style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;color:#101820;padding:20px;\">
+    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px;margin:auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;\">
+      <tr><td style=\"padding:24px;\">
+        <h1 style=\"margin:0 0 12px;font-size:24px;\">Membership Renewal Reminder</h1>
+        <p style=\"margin:0 0 14px;\">Hello {member.name}, your membership is nearing renewal.</p>
+        <p style=\"margin:0 0 8px;\"><strong>Plan:</strong> {member.plan_name or 'Prepaid Package'}</p>
+        <p style=\"margin:0 0 8px;\"><strong>Expiration Date:</strong> {expiration_text}</p>
+        <p style=\"margin:0 0 20px;\"><strong>Remaining Oil Changes:</strong> {member.remaining_changes}</p>
+        <p style=\"margin:0;\"><a href=\"{public_card_url}\" style=\"display:inline-block;background:#087b78;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;\">View My Membership Card</a></p>
+      </td></tr>
+    </table>
+  </body>
+</html>"""
+    return send_smtp_email(member.email, subject, text_body, html_body)
+
+
+def send_unused_benefit_reminder_email(member):
+    vehicle = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).first()
+    vehicle_text = vehicle.display_name if vehicle else "No registered vehicle"
+    with app.test_request_context("/"):
+        appointment_link = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
+    subject = "Use Your Carnova Oil Club Benefits"
+    text_body = f"""Hello {member.name},
+
+You still have unused oil change benefits waiting.
+
+Remaining Oil Changes: {member.remaining_changes}
+Registered Vehicle: {vehicle_text}
+
+Schedule your next oil change:
+{appointment_link}
+"""
+    html_body = f"""<!DOCTYPE html>
+<html lang=\"en\">
+  <body style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;color:#101820;padding:20px;\">
+    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px;margin:auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;\">
+      <tr><td style=\"padding:24px;\">
+        <h1 style=\"margin:0 0 12px;font-size:24px;\">Use Your Membership Benefits</h1>
+        <p style=\"margin:0 0 14px;\">Hello {member.name}, you still have service benefits available.</p>
+        <p style=\"margin:0 0 8px;\"><strong>Remaining Oil Changes:</strong> {member.remaining_changes}</p>
+        <p style=\"margin:0 0 20px;\"><strong>Registered Vehicle:</strong> {vehicle_text}</p>
+        <p style=\"margin:0;\"><a href=\"{appointment_link}\" style=\"display:inline-block;background:#087b78;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;\">Schedule My Oil Change</a></p>
+      </td></tr>
+    </table>
+  </body>
+</html>"""
+    return send_smtp_email(member.email, subject, text_body, html_body)
+
+
+def run_renewal_reminders(reference_date=None):
+    today = reference_date or date.today()
+    summary = {"sent": 0, "skipped": 0, "failed": 0}
+    renewal_offsets = {30, 7, 1}
+
+    active_members = Member.query.filter_by(status="active").all()
+    for member in active_members:
+        days_until_expiration = (member.expiration_date - today).days
+        if days_until_expiration not in renewal_offsets:
+            continue
+
+        reminder_key = f"renewal:{member.expiration_date.isoformat()}:{days_until_expiration}"
+        if reminder_already_sent(member.id, "renewal", reminder_key):
+            summary["skipped"] += 1
+            continue
+
+        if send_renewal_reminder_email(member, days_until_expiration):
+            remember_sent_reminder(member.id, "renewal", reminder_key)
+            summary["sent"] += 1
+            print("RENEWAL REMINDER SENT", member.member_id)
+        else:
+            summary["failed"] += 1
+            print("REMINDER FAILED", member.member_id)
+
+    return summary
+
+
+def run_unused_benefit_reminders(reference_date=None):
+    today = reference_date or date.today()
+    summary = {"sent": 0, "skipped": 0, "failed": 0}
+    inactive_cutoff = datetime.combine(today - timedelta(days=120), time.max)
+    resend_cutoff = datetime.combine(today - timedelta(days=90), time.min)
+
+    for member in Member.query.all():
+        if member.status != "active":
+            summary["skipped"] += 1
+            continue
+
+        if member.remaining_changes <= 0:
+            summary["skipped"] += 1
+            continue
+
+        latest_redemption = (
+            Redemption.query.filter_by(member_id=member.id)
+            .order_by(Redemption.redeemed_at.desc())
+            .first()
+        )
+
+        if latest_redemption and latest_redemption.redeemed_at > inactive_cutoff:
+            summary["skipped"] += 1
+            continue
+
+        recent_unused = (
+            ReminderLog.query.filter_by(member_id=member.id, reminder_type="unused_benefit")
+            .filter(ReminderLog.sent_at >= resend_cutoff)
+            .first()
+        )
+        if recent_unused:
+            summary["skipped"] += 1
+            continue
+
+        reminder_key = f"unused-benefit:{today.toordinal() // 90}"
+        if reminder_already_sent(member.id, "unused_benefit", reminder_key):
+            summary["skipped"] += 1
+            continue
+
+        if send_unused_benefit_reminder_email(member):
+            remember_sent_reminder(member.id, "unused_benefit", reminder_key)
+            summary["sent"] += 1
+            print("UNUSED BENEFIT REMINDER SENT", member.member_id)
+        else:
+            summary["failed"] += 1
+            print("REMINDER FAILED", member.member_id)
+
+    return summary
+
+
+def run_all_reminders(reference_date=None):
+    refresh_member_statuses()
+    renewal_summary = run_renewal_reminders(reference_date=reference_date)
+    unused_summary = run_unused_benefit_reminders(reference_date=reference_date)
+    return {
+        "sent": renewal_summary["sent"] + unused_summary["sent"],
+        "skipped": renewal_summary["skipped"] + unused_summary["skipped"],
+        "failed": renewal_summary["failed"] + unused_summary["failed"],
+        "renewal": renewal_summary,
+        "unused_benefit": unused_summary,
+    }
+
+
 @app.context_processor
 def shared_template_values():
     return {"today": date.today(), "current_year": date.today().year}
@@ -606,6 +829,13 @@ def dashboard():
         monthly_new_members_chart=monthly_new_members_chart,
         upcoming_appointments=upcoming_appointments,
     )
+
+
+@app.route("/admin/run-reminders", methods=["POST"])
+@login_required
+def run_reminders_now():
+    summary = run_all_reminders()
+    return render_template("reminder_summary.html", summary=summary)
 
 
 @app.route("/members/new", methods=["GET", "POST"])

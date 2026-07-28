@@ -1,11 +1,21 @@
 import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 import stripe
 
-from app import Member, Redemption, Vehicle, current_member_status, db, monthly_membership_defaults
+from app import (
+    Member,
+    Redemption,
+    ReminderLog,
+    Vehicle,
+    current_member_status,
+    db,
+    monthly_membership_defaults,
+    run_renewal_reminders,
+    run_unused_benefit_reminders,
+)
 from app import app as flask_app
 
 
@@ -790,3 +800,151 @@ def test_bronze_silver_gold_plans_remain_unchanged(client, monkeypatch):
     assert member is not None
     assert member.plan_name == "Bronze"
     assert member.subscription_status is None
+
+
+def _create_member_for_reminders(
+    email,
+    expiration_days=365,
+    status="active",
+    remaining_changes=3,
+    total_changes=3,
+):
+    member = Member(
+        name=email.split("@")[0].replace(".", " ").title(),
+        email=email,
+        member_id=f"COC-{abs(hash(email)) % 100000:05d}",
+        expiration_date=date.today() + timedelta(days=expiration_days),
+        remaining_changes=remaining_changes,
+        total_changes=total_changes,
+        status=status,
+        token=f"token-{abs(hash(email)) % 100000}",
+        plan_name="Monthly Membership",
+        subscription_status="active" if status == "active" else None,
+    )
+    db.session.add(member)
+    db.session.commit()
+    return member
+
+
+def test_renewal_reminder_sent_at_30_days(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("renewal30@example.com", expiration_days=30)
+    member.expiration_date = today + timedelta(days=30)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_renewal_reminders(reference_date=today)
+
+    assert summary["sent"] == 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="renewal").count() == 1
+
+
+def test_renewal_reminder_sent_at_7_days(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("renewal7@example.com", expiration_days=7)
+    member.expiration_date = today + timedelta(days=7)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_renewal_reminders(reference_date=today)
+
+    assert summary["sent"] == 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="renewal").count() == 1
+
+
+def test_renewal_reminder_sent_at_1_day(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("renewal1@example.com", expiration_days=1)
+    member.expiration_date = today + timedelta(days=1)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_renewal_reminders(reference_date=today)
+
+    assert summary["sent"] == 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="renewal").count() == 1
+
+
+def test_duplicate_renewal_reminder_is_prevented(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("renewal-dup@example.com", expiration_days=7)
+    member.expiration_date = today + timedelta(days=7)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    first_summary = run_renewal_reminders(reference_date=today)
+    second_summary = run_renewal_reminders(reference_date=today)
+
+    assert first_summary["sent"] == 1
+    assert second_summary["sent"] == 0
+    assert second_summary["skipped"] >= 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="renewal").count() == 1
+
+
+def test_unused_benefit_reminder_sent_after_120_days(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("unused120@example.com", expiration_days=180)
+    old_redemption = Redemption(
+        member_id=member.id,
+        redeemed_at=datetime.combine(today - timedelta(days=121), datetime.min.time()),
+        vehicle="Test Vehicle",
+        mileage="12345",
+    )
+    db.session.add(old_redemption)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_unused_benefit_reminders(reference_date=today)
+
+    assert summary["sent"] == 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="unused_benefit").count() == 1
+
+
+def test_unused_benefit_reminder_not_repeated_within_90_days(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("unused90@example.com", expiration_days=180)
+    old_redemption = Redemption(
+        member_id=member.id,
+        redeemed_at=datetime.combine(today - timedelta(days=130), datetime.min.time()),
+        vehicle="Test Vehicle",
+        mileage="12345",
+    )
+    db.session.add(old_redemption)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    first_summary = run_unused_benefit_reminders(reference_date=today)
+    second_summary = run_unused_benefit_reminders(reference_date=today + timedelta(days=30))
+
+    assert first_summary["sent"] == 1
+    assert second_summary["sent"] == 0
+    assert second_summary["skipped"] >= 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="unused_benefit").count() == 1
+
+
+def test_unused_benefit_inactive_member_skipped(client, monkeypatch):
+    _create_member_for_reminders("unused-inactive@example.com", status="cancelled", remaining_changes=3)
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_unused_benefit_reminders(reference_date=date.today())
+
+    assert summary["sent"] == 0
+    assert summary["skipped"] >= 1
+    assert ReminderLog.query.filter_by(reminder_type="unused_benefit").count() == 0
+
+
+def test_unused_benefit_member_with_zero_remaining_changes_skipped(client, monkeypatch):
+    _create_member_for_reminders("unused-zero@example.com", remaining_changes=0, total_changes=3)
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_unused_benefit_reminders(reference_date=date.today())
+
+    assert summary["sent"] == 0
+    assert summary["skipped"] >= 1
+    assert ReminderLog.query.filter_by(reminder_type="unused_benefit").count() == 0
