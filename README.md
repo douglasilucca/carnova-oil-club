@@ -34,3 +34,4 @@
 - SMTP_FROM_EMAIL
 
 The appointment system works without email configuration.
+Auto deploy test 2026
