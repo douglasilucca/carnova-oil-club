@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Register Vehicle | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="public-wrap register-vehicle-page">
+  <section class="panel register-vehicle-panel">
+    <p class="eyebrow">CARNOVA OIL CLUB</p>
+    <h1>Register Your Vehicle</h1>
+    <p class="muted">Hi {{ member.name }}, register your primary vehicle to unlock appointment scheduling and member services.</p>
+
+    <form method="post" class="form-grid register-vehicle-form" novalidate>
+      <label>
+        Year
+        <input name="year" inputmode="numeric" maxlength="4" placeholder="2022" value="{{ form_values.year }}" required>
+      </label>
+      <label>
+        Make
+        <input name="make" maxlength="100" placeholder="Toyota" value="{{ form_values.make }}" required>
+      </label>
+      <label>
+        Model
+        <input name="model" maxlength="100" placeholder="Camry" value="{{ form_values.model }}" required>
+      </label>
+      <label>
+        Color
+        <input name="color" maxlength="50" placeholder="Black" value="{{ form_values.color }}" required>
+      </label>
+      <label>
+        License Plate
+        <input name="plate" maxlength="30" placeholder="ABC1234" value="{{ form_values.plate }}" required>
+      </label>
+      <label>
+        Last 8 Digits of VIN
+        <input name="vin_last8" maxlength="8" placeholder="1A2B3C4D" value="{{ form_values.vin_last8 }}" required>
+      </label>
+      <label class="wide">
+        Current Mileage
+        <input name="current_mileage" inputmode="numeric" maxlength="30" placeholder="65210" value="{{ form_values.current_mileage }}" required>
+      </label>
+
+      <div class="actions wide">
+        <button type="submit" class="button primary large-button">Save Vehicle</button>
+        <a class="button ghost" href="{{ url_for('member_public', token=member.token) }}">Back to Membership Card</a>
+      </div>
+    </form>
+  </section>
+</section>
+{% endblock %}

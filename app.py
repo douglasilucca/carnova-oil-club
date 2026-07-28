@@ -932,6 +932,10 @@ def public_new_appointment(token):
     member = Member.query.filter_by(token=token).first_or_404()
     vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
 
+    if not vehicles:
+        flash("Please register your vehicle before scheduling an appointment.", "error")
+        return redirect(url_for("member_public", token=member.token))
+
     selected_date_text = request.values.get("appointment_date", "").strip()
     selected_date = None
     available_slots = []
@@ -1005,6 +1009,73 @@ def public_new_appointment(token):
     )
 
 
+@app.route("/m/<token>/vehicle/register", methods=["GET", "POST"])
+def public_register_vehicle(token):
+    member = Member.query.filter_by(token=token).first_or_404()
+
+    existing_vehicle = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).first()
+    if existing_vehicle:
+        flash("Your membership already has a registered vehicle.", "error")
+        return redirect(url_for("member_public", token=member.token))
+
+    form_values = {
+        "year": "",
+        "make": "",
+        "model": "",
+        "color": "",
+        "plate": "",
+        "vin_last8": "",
+        "current_mileage": "",
+    }
+
+    if request.method == "POST":
+        form_values = {
+            "year": request.form.get("year", "").strip(),
+            "make": request.form.get("make", "").strip(),
+            "model": request.form.get("model", "").strip(),
+            "color": request.form.get("color", "").strip(),
+            "plate": request.form.get("plate", "").strip().upper(),
+            "vin_last8": request.form.get("vin_last8", "").strip().upper(),
+            "current_mileage": request.form.get("current_mileage", "").strip(),
+        }
+
+        year = form_values["year"]
+        make = form_values["make"]
+        model = form_values["model"]
+        color = form_values["color"]
+        plate = form_values["plate"]
+        vin_last8 = form_values["vin_last8"]
+        current_mileage = form_values["current_mileage"]
+
+        if not all([year, make, model, color, plate, vin_last8, current_mileage]):
+            flash("Please complete every vehicle registration field.", "error")
+        elif not (year.isdigit() and len(year) == 4):
+            flash("Year must be a 4-digit number.", "error")
+        elif len(vin_last8) != 8 or not vin_last8.isalnum():
+            flash("Last 8 VIN digits must be exactly 8 letters or numbers.", "error")
+        else:
+            vehicle = Vehicle(
+                member_id=member.id,
+                year=year,
+                make=make,
+                model=model,
+                color=color,
+                plate=plate,
+                vin=vin_last8,
+                current_mileage=current_mileage,
+            )
+            db.session.add(vehicle)
+            db.session.commit()
+            flash("Vehicle registered successfully.", "success")
+            return redirect(url_for("member_public", token=member.token))
+
+    return render_template(
+        "public_vehicle_register.html",
+        member=member,
+        form_values=form_values,
+    )
+
+
 @app.route("/m/<token>/appointments/<int:appointment_id>/confirmation")
 def appointment_confirmation(token, appointment_id):
     member = Member.query.filter_by(token=token).first_or_404()
@@ -1047,12 +1118,14 @@ def member_public(token):
     member = Member.query.filter_by(token=token).first_or_404()
     member.status = current_member_status(member)
     db.session.commit()
+    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
+    has_vehicle = bool(vehicles)
+    primary_vehicle = vehicles[0] if vehicles else None
     redemptions = (
         Redemption.query.filter_by(member_id=member.id)
         .order_by(Redemption.redeemed_at.desc())
         .all()
     )
-    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
     upcoming_appointments = (
         Appointment.query.filter_by(member_id=member.id)
         .filter(
@@ -1066,6 +1139,8 @@ def member_public(token):
         "member_public.html",
         member=member,
         vehicles=vehicles,
+        has_vehicle=has_vehicle,
+        primary_vehicle=primary_vehicle,
         redemptions=redemptions,
         upcoming_appointments=upcoming_appointments,
     )

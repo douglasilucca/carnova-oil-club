@@ -9,6 +9,11 @@
     <div class="remaining-number">{{ member.remaining_changes }}</div>
     <p>premium full synthetic oil changes remaining</p>
     <div class="progress"><span style="width: {{ (member.remaining_changes / member.total_changes * 100) if member.total_changes else 0 }}%"></span></div>
+    {% if primary_vehicle %}
+    <p class="registered-vehicle">Registered Vehicle: {{ primary_vehicle.display_name }}{% if primary_vehicle.plate %} · Plate {{ primary_vehicle.plate }}{% endif %}</p>
+    {% else %}
+    <p class="registered-vehicle">Vehicle registration required before booking service.</p>
+    {% endif %}
     <div class="member-card-bottom">
       <div class="card-meta three"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Plan<br><strong>{{ member.plan_name or 'Prepaid Package' }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
       <div class="card-qr">
@@ -19,6 +24,19 @@
     </div>
   </article>
 
+  {% if not has_vehicle %}
+  <section class="panel vehicle-gate">
+    <p class="eyebrow">VEHICLE REGISTRATION REQUIRED</p>
+    <h2>Register Your Vehicle To Activate Member Services</h2>
+    <p class="muted">Before scheduling appointments, please register your primary vehicle. This only takes a minute.</p>
+    <a class="button primary large-register-button" href="{{ url_for('public_register_vehicle', token=member.token) }}">Register My Vehicle</a>
+    {% if can_access_billing_portal(member) %}
+    <form method="post" action="{{ url_for('public_member_billing_portal', token=member.token) }}" style="display:inline-block;">
+      <button class="button secondary" type="submit">Manage Subscription</button>
+    </form>
+    {% endif %}
+  </section>
+  {% else %}
 
   <section class="panel schedule-callout">
     <div>
@@ -76,6 +94,8 @@
     </div>
     {% else %}<p class="muted">No oil changes have been redeemed yet.</p>{% endfor %}
   </section>
+  {% endif %}
+
   <p class="public-note">Present this digital card at Carnova of Southborough when receiving service.</p>
 </section>
 {% endblock %}
