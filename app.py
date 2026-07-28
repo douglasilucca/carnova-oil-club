@@ -8,7 +8,7 @@ from io import BytesIO, StringIO
 
 import qrcode
 import stripe
-from flask import Flask, Response, flash, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, Response, flash, has_request_context, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -212,6 +212,23 @@ def next_member_id():
     last = Member.query.order_by(Member.id.desc()).first()
     number = 1 if not last else last.id + 1
     return f"COC-{number:05d}"
+
+
+def resolve_public_base_url():
+    for env_name in ("BASE_URL", "APP_URL", "PUBLIC_URL", "RENDER_EXTERNAL_URL"):
+        value = os.environ.get(env_name, "").strip().rstrip("/")
+        if value:
+            if "://" not in value:
+                scheme = "http" if value.startswith(("localhost", "127.0.0.1", "[::1]")) else "https"
+                value = f"{scheme}://{value}"
+            return value
+    if has_request_context():
+        return request.url_root.rstrip("/")
+    return ""
+
+
+def member_public_url(member):
+    return f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}"
 
 
 def monthly_membership_defaults(reference_date=None):
@@ -610,7 +627,7 @@ def public_member_billing_portal(token):
         flash("That member could not be found.", "error")
         return redirect(url_for("login"))
 
-    return_url = request.url_root.rstrip("/") + url_for("member_public", token=member.token)
+    return_url = member_public_url(member)
     session_url = create_billing_portal_session(member, return_url)
     if session_url:
         return redirect(session_url)
@@ -629,9 +646,7 @@ def member_detail(member_id):
         .order_by(Redemption.redeemed_at.desc())
         .all()
     )
-    public_url = request.url_root.rstrip("/") + url_for(
-        "member_public", token=member.token
-    )
+    public_url = member_public_url(member)
     vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
     return render_template(
         "member_detail.html",
@@ -1060,9 +1075,7 @@ def member_public(token):
 @login_required
 def member_qr(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
-    public_url = request.url_root.rstrip("/") + url_for(
-        "member_public", token=member.token
-    )
+    public_url = member_public_url(member)
     image = qrcode.make(public_url)
     stream = BytesIO()
     image.save(stream, format="PNG")

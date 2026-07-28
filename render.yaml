@@ -14,6 +14,8 @@ services:
         value: admin@carnovaoil.com
       - key: ADMIN_PASSWORD
         sync: false
+      - key: BASE_URL
+        sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
       - key: DATABASE_URL

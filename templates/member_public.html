@@ -9,7 +9,7 @@
     <div class="remaining-number">{{ member.remaining_changes }}</div>
     <p>premium full synthetic oil changes remaining</p>
     <div class="progress"><span style="width: {{ (member.remaining_changes / member.total_changes * 100) if member.total_changes else 0 }}%"></span></div>
-    <div class="card-meta"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
+    <div class="card-meta three"><span>Member<br><strong>{{ member.member_id }}</strong></span><span>Plan<br><strong>{{ member.plan_name or 'Prepaid Package' }}</strong></span><span>Expires<br><strong>{{ member.expiration_date.strftime('%m/%d/%Y') }}</strong></span></div>
   </article>
 
 

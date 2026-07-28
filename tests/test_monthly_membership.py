@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import pytest
 import stripe
 
-from app import Member, Vehicle, current_member_status, db, monthly_membership_defaults
+from app import Member, Redemption, Vehicle, current_member_status, db, monthly_membership_defaults
 from app import app as flask_app
 
 
@@ -92,6 +92,129 @@ def test_monthly_membership_rejects_second_vehicle(client):
     assert response.status_code == 200
     assert b"Monthly Membership allows only one registered vehicle." in response.data
     assert Vehicle.query.filter_by(member_id=member.id).count() == 1
+
+
+def test_member_detail_shows_qr_for_public_verification(client, monkeypatch):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+
+    with flask_app.app_context():
+        member = Member(
+            name="QR Member",
+            email="qr@example.com",
+            member_id="COC-00901",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="qr-member-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    response = client.get(f"/members/{member_id}")
+
+    assert response.status_code == 200
+    assert b"Scan to verify membership" in response.data
+    assert f"/members/{member_id}/qr".encode() in response.data
+    assert b"QR Member" in response.data
+
+
+def test_member_qr_points_to_tokenized_public_card(client, monkeypatch):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+
+    with flask_app.app_context():
+        member = Member(
+            name="QR Route Member",
+            email="qr-route@example.com",
+            member_id="COC-00902",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="qr-route-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    captured = {}
+
+    class FakeImage:
+        def save(self, stream, format):
+            stream.write(b"PNG")
+
+    def fake_make(public_url):
+        captured["public_url"] = public_url
+        return FakeImage()
+
+    monkeypatch.setattr("app.qrcode.make", fake_make)
+
+    response = client.get(f"/members/{member_id}/qr")
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert captured["public_url"] == "https://cards.carnova.test/m/qr-route-token"
+    assert "localhost" not in captured["public_url"].lower()
+
+
+def test_public_member_card_works_and_uses_safe_fields(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Public Member",
+            email="public@example.com",
+            phone="555-123-4567",
+            member_id="COC-00903",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=2,
+            total_changes=3,
+            token="public-member-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.flush()
+        vehicle = Vehicle(member_id=member.id, make="Toyota", model="Camry", plate="ABC123", current_mileage="40210")
+        db.session.add(vehicle)
+        db.session.add(
+            Redemption(
+                member_id=member.id,
+                vehicle_id=vehicle.id,
+                vehicle=vehicle.display_name,
+                mileage="40210",
+            )
+        )
+        db.session.commit()
+
+    response = client.get("/m/public-member-token")
+
+    assert response.status_code == 200
+    assert b"Public Member" in response.data
+    assert b"public@example.com" not in response.data
+    assert b"555-123-4567" not in response.data
+    assert b"Toyota Camry" in response.data
+    assert b"Monthly Membership" in response.data
+    assert b"Service History" in response.data
+
+
+def test_invalid_public_member_token_returns_404(client):
+    response = client.get("/m/does-not-exist")
+
+    assert response.status_code == 404
 
 
 def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_button(client, monkeypatch):
