@@ -2034,8 +2034,10 @@ def mark_stripe_event_processed(event):
 
 def send_ga4_purchase_event(checkout_session):
     try:
+        print("GA4: function started")
         measurement_id = os.environ.get("GA4_MEASUREMENT_ID", "").strip()
         api_secret = os.environ.get("GA4_API_SECRET", "").strip()
+        print("GA4: environment variables loaded")
         if not measurement_id or not api_secret:
             print("GA4 purchase event skipped: missing GA4_MEASUREMENT_ID or GA4_API_SECRET")
             return
@@ -2095,8 +2097,10 @@ def send_ga4_purchase_event(checkout_session):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        print("GA4: sending purchase event")
         with urllib_request.urlopen(req, timeout=5):
             pass
+        print("GA4: purchase sent successfully")
     except Exception as error:
         print("GA4 purchase event error:", error)
 
