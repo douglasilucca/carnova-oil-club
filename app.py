@@ -1,10 +1,12 @@
 import csv
+import json
 import os
 import re
 import secrets
 from datetime import date, datetime, timedelta, time
 from functools import wraps
 from io import BytesIO, StringIO
+from urllib import parse, request as urllib_request
 
 import qrcode
 import stripe
@@ -2030,6 +2032,75 @@ def mark_stripe_event_processed(event):
     db.session.add(StripeEvent(event_id=event_id, event_type=event.get("type", "unknown")))
 
 
+def send_ga4_purchase_event(checkout_session):
+    try:
+        measurement_id = os.environ.get("GA4_MEASUREMENT_ID", "").strip()
+        api_secret = os.environ.get("GA4_API_SECRET", "").strip()
+        if not measurement_id or not api_secret:
+            print("GA4 purchase event skipped: missing GA4_MEASUREMENT_ID or GA4_API_SECRET")
+            return
+
+        metadata = checkout_session.get("metadata") or {}
+        client_id = (
+            str(metadata.get("ga_client_id") or "").strip()
+            or str(stripe_object_id(checkout_session.get("customer")) or "").strip()
+            or str(checkout_session.get("id") or "").strip()
+        )
+        if not client_id:
+            print("GA4 purchase event skipped: missing client_id")
+            return
+
+        amount_total = checkout_session.get("amount_total") or 0
+        currency = str(checkout_session.get("currency") or "USD").upper()
+        plan_name = (
+            str(metadata.get("plan_name") or "").strip()
+            or str(metadata.get("membership_plan_name") or "").strip()
+            or "Carnova Oil Club Membership"
+        )
+
+        payload = {
+            "client_id": client_id,
+            "events": [
+                {
+                    "name": "purchase",
+                    "params": {
+                        "transaction_id": str(checkout_session.get("id") or ""),
+                        "value": float(amount_total) / 100.0,
+                        "currency": currency,
+                        "engagement_time_msec": 1,
+                        "items": [
+                            {
+                                "item_name": plan_name,
+                                "quantity": 1,
+                                "price": float(amount_total) / 100.0,
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        endpoint = (
+            "https://www.google-analytics.com/mp/collect?"
+            + parse.urlencode(
+                {
+                    "measurement_id": measurement_id,
+                    "api_secret": api_secret,
+                }
+            )
+        )
+        req = urllib_request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib_request.urlopen(req, timeout=5):
+            pass
+    except Exception as error:
+        print("GA4 purchase event error:", error)
+
+
 def process_checkout_completed(obj):
     details = obj.get("customer_details") or {}
     shipping = obj.get("shipping_details") or {}
@@ -2257,10 +2328,12 @@ def stripe_webhook():
     event_type = event.get("type")
     obj = event["data"]["object"]
     member = None
+    ga4_checkout_session = None
 
     try:
         if event_type == "checkout.session.completed":
             member, _was_created = process_checkout_completed(obj)
+            ga4_checkout_session = obj
         elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
             process_invoice_payment_succeeded(obj)
         elif event_type == "invoice.payment_failed":
@@ -2284,6 +2357,9 @@ def stripe_webhook():
         db.session.rollback()
         print("Stripe webhook processing error:", error)
         return "Webhook processing failed", 500
+
+    if ga4_checkout_session:
+        send_ga4_purchase_event(ga4_checkout_session)
 
     if member:
         print("MEMBERSHIP EMAIL TRIGGERED")
