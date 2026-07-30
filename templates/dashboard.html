@@ -9,6 +9,7 @@
     <form method="post" action="{{ url_for('run_reminders_now') }}" style="display:inline-block;">
       <button class="button ghost" type="submit">Run Reminders Now</button>
     </form>
+    <a class="button danger" href="{{ url_for('reset_test_data') }}">Reset All Customer Data</a>
     <a class="button primary" href="{{ url_for('new_member') }}">+ New Member</a>
   </div>
 </div>

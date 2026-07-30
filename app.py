@@ -224,6 +224,52 @@ def login_required(view):
     return wrapped
 
 
+@app.route("/admin/reset-test-data", methods=["GET", "POST"])
+@login_required
+def reset_test_data():
+    confirmation_required = "DELETE ALL CUSTOMER DATA"
+
+    if request.method == "POST":
+        confirmation_text = request.form.get("confirmation_text", "")
+        if confirmation_text != confirmation_required:
+            flash(f'Type {confirmation_required} exactly to confirm the reset.', "error")
+            return render_template(
+                "reset_test_data.html",
+                confirmation_required=confirmation_required,
+            )
+
+        try:
+            deleted_counts = {}
+            db.session.rollback()
+            with db.session.begin():
+                deleted_counts["appointments"] = db.session.query(Appointment).delete(synchronize_session=False)
+                deleted_counts["redemptions"] = db.session.query(Redemption).delete(synchronize_session=False)
+                deleted_counts["reminder_logs"] = db.session.query(ReminderLog).delete(synchronize_session=False)
+                deleted_counts["vehicles"] = db.session.query(Vehicle).delete(synchronize_session=False)
+                deleted_counts["members"] = db.session.query(Member).delete(synchronize_session=False)
+        except Exception as error:
+            db.session.rollback()
+            print("Reset test data failed:", error)
+            flash("Could not reset test data right now.", "error")
+            return render_template(
+                "reset_test_data.html",
+                confirmation_required=confirmation_required,
+            )
+
+        flash(
+            "All customer data reset complete: "
+            f'{deleted_counts["appointments"]} appointments, '
+            f'{deleted_counts["redemptions"]} redemptions, '
+            f'{deleted_counts["reminder_logs"]} reminder logs, '
+            f'{deleted_counts["vehicles"]} vehicles, '
+            f'{deleted_counts["members"]} members deleted.',
+            "success",
+        )
+        return redirect(url_for("dashboard"))
+
+    return render_template("reset_test_data.html", confirmation_required=confirmation_required)
+
+
 def next_member_id():
     last = Member.query.order_by(Member.id.desc()).first()
     number = 1 if not last else last.id + 1

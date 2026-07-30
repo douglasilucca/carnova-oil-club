@@ -6,9 +6,12 @@ import pytest
 import stripe
 
 from app import (
+    Admin,
+    Appointment,
     Member,
     Redemption,
     ReminderLog,
+    StripeEvent,
     Vehicle,
     current_member_status,
     db,
@@ -263,7 +266,6 @@ def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_butt
         assert member is not None
         assert member.plan_name == "Monthly Membership"
         assert member.stripe_price_id == "price_1Txt07R1GwRFNmYeGo3km5vf"
-
     login_response = client.post(
         "/login",
         data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
@@ -297,6 +299,99 @@ def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_butt
     assert b"Vehicle Limit Reached" in member_detail_response.data
     assert b"Monthly Membership includes one registered vehicle only." in member_detail_response.data
     assert b"+ Add Vehicle" not in member_detail_response.data
+
+
+def test_reset_all_customer_data_requires_exact_confirmation_and_preserves_admin_and_stripe_records(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Reset Member",
+            email="reset@example.com",
+            member_id="COC-00904",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=2,
+            total_changes=3,
+            token="reset-member-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.flush()
+
+        vehicle = Vehicle(member_id=member.id, make="Toyota", model="Camry", plate="RESET1")
+        db.session.add(vehicle)
+        db.session.flush()
+
+        db.session.add(
+            Appointment(
+                member_id=member.id,
+                vehicle_id=vehicle.id,
+                appointment_date=date.today() + timedelta(days=1),
+                appointment_time=datetime.now().time(),
+                service_type="Oil Change",
+            )
+        )
+        db.session.add(
+            Redemption(
+                member_id=member.id,
+                vehicle_id=vehicle.id,
+                vehicle=vehicle.display_name,
+                mileage="40210",
+            )
+        )
+        db.session.add(
+            ReminderLog(
+                member_id=member.id,
+                reminder_type="renewal",
+                reminder_key="reset-test",
+            )
+        )
+        db.session.add(StripeEvent(event_id="evt_keep", event_type="checkout.session.completed"))
+        db.session.commit()
+
+    login_response = client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+    assert login_response.status_code == 200
+
+    confirmation_response = client.get("/admin/reset-test-data")
+    assert confirmation_response.status_code == 200
+    assert b"DELETE ALL CUSTOMER DATA" in confirmation_response.data
+
+    rejected_response = client.post(
+        "/admin/reset-test-data",
+        data={"confirmation_text": "DELETE ALL CUSTOMER DATA ",},
+        follow_redirects=True,
+    )
+    assert rejected_response.status_code == 200
+    assert b"Type DELETE ALL CUSTOMER DATA exactly" in rejected_response.data
+
+    with flask_app.app_context():
+        assert Member.query.count() == 1
+        assert Vehicle.query.count() == 1
+        assert Appointment.query.count() == 1
+        assert Redemption.query.count() == 1
+        assert ReminderLog.query.count() == 1
+        assert StripeEvent.query.count() == 1
+        assert Admin.query.count() == 1
+
+    reset_response = client.post(
+        "/admin/reset-test-data",
+        data={"confirmation_text": "DELETE ALL CUSTOMER DATA"},
+        follow_redirects=True,
+    )
+    assert reset_response.status_code == 200
+    assert b"All customer data reset complete:" in reset_response.data
+
+    with flask_app.app_context():
+        assert Member.query.count() == 0
+        assert Vehicle.query.count() == 0
+        assert Appointment.query.count() == 0
+        assert Redemption.query.count() == 0
+        assert ReminderLog.query.count() == 0
+        assert StripeEvent.query.count() == 1
+        assert Admin.query.count() == 1
 
 
 def test_portal_session_is_created_for_monthly_member(client, monkeypatch):

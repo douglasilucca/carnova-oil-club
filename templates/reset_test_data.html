@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Reset All Customer Data | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="confirmation-wrap">
+  <article class="confirmation-card">
+    <div class="confirmation-check">!</div>
+    <p class="eyebrow">ADMIN ONLY</p>
+    <h1 style="margin:0 0 10px;">Reset All Customer Data</h1>
+    <p class="muted" style="line-height:1.7;max-width:54ch;margin:0 auto;">
+      This will permanently delete ALL members and related records, including appointments, redemptions, reminder logs, and vehicles.
+      Member public links and QR access will stop working because the Member records and tokens are deleted.
+      Stripe configuration, webhook configuration, analytics configuration, admin users, plans, and application settings are kept.
+    </p>
+
+    <form method="post" class="stack" style="margin-top:28px;text-align:left;">
+      <label for="confirmation_text">Type DELETE ALL CUSTOMER DATA to continue</label>
+      <input
+        id="confirmation_text"
+        name="confirmation_text"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="DELETE ALL CUSTOMER DATA"
+        required
+      >
+      <div class="actions centered" style="margin-top:10px;">
+        <a class="button secondary" href="{{ url_for('dashboard') }}">Cancel</a>
+        <button class="button danger" type="submit">Delete All Customer Data</button>
+      </div>
+    </form>
+  </article>
+</div>
+{% endblock %}
