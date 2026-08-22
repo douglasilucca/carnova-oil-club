@@ -363,6 +363,7 @@ def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, mo
 
     token_fetches = {"count": 0}
     api_access_tokens = []
+    object_patch_calls = {"count": 0}
 
     def fake_access_token():
         token_fetches["count"] += 1
@@ -373,22 +374,28 @@ def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, mo
         if endpoint.endswith("/genericClass/issuer123.class123") and method == "PATCH":
             return 200, {}
         if endpoint.endswith("/genericObject/issuer123.carnova_coc-00912") and method == "PATCH":
-            return 404, {}
+            object_patch_calls["count"] += 1
+            if object_patch_calls["count"] == 1:
+                return 404, {}
+            return 200, {}
         return 201, {}
 
     monkeypatch.setenv("GOOGLE_WALLET_ISSUER_ID", "issuer123")
     monkeypatch.setenv("GOOGLE_WALLET_CLASS_ID", "class123")
+    monkeypatch.setattr("app.GOOGLE_WALLET_ENSURED_CLASS_IDS", set())
     monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
     monkeypatch.setattr("app.google_wallet_api_call", fake_api_call)
 
     with flask_app.app_context(), flask_app.test_request_context("/"):
         member = Member.query.get(member_id)
         assert google_wallet_upsert_member_object(member) is True
-    assert token_fetches["count"] == 1
+        assert google_wallet_upsert_member_object(member) is True
+    assert token_fetches["count"] == 2
     assert api_access_tokens == [
         ("PATCH", "https://walletobjects.googleapis.com/walletobjects/v1/genericClass/issuer123.class123", "cached-wallet-token"),
         ("PATCH", "https://walletobjects.googleapis.com/walletobjects/v1/genericObject/issuer123.carnova_coc-00912", "cached-wallet-token"),
         ("POST", "https://walletobjects.googleapis.com/walletobjects/v1/genericObject", "cached-wallet-token"),
+        ("PATCH", "https://walletobjects.googleapis.com/walletobjects/v1/genericObject/issuer123.carnova_coc-00912", "cached-wallet-token"),
     ]
 
 
@@ -428,7 +435,10 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
     assert payload["textModulesData"][0]["body"] == "3 OIL CHANGES REMAINING"
 
     assert payload["logo"]["sourceUri"]["uri"] == "https://cards.carnova.test/static/carnova-logo.png"
-    assert "linksModuleData" not in payload
+    assert len(payload["linksModuleData"]["uris"]) == 1
+    assert payload["linksModuleData"]["uris"][0]["id"] == "manage_package"
+    assert payload["linksModuleData"]["uris"][0]["description"] == "Manage Your Package"
+    assert payload["linksModuleData"]["uris"][0]["uri"] == "https://cards.carnova.test/m/wallet-payload-token"
     assert payload["appLinkData"]["displayText"]["defaultValue"]["value"] == "Schedule Oil Change"
     assert payload["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"] == (
         "https://cards.carnova.test/m/wallet-payload-token/appointments/new"
@@ -437,16 +447,18 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
 
 
 @pytest.mark.parametrize(
-    ("base_url", "expected_logo_url", "expected_schedule_url"),
+    ("base_url", "expected_logo_url", "expected_manage_url", "expected_schedule_url"),
     [
         (
             "https://example.com",
             "https://example.com/static/carnova-logo.png",
+            "https://example.com/m/wallet-payload-token",
             "https://example.com/m/wallet-payload-token/appointments/new",
         ),
         (
             "https://example.com/carnova",
             "https://example.com/carnova/static/carnova-logo.png",
+            "https://example.com/carnova/m/wallet-payload-token",
             "https://example.com/carnova/m/wallet-payload-token/appointments/new",
         ),
     ],
@@ -456,6 +468,7 @@ def test_google_wallet_payload_urls_respect_base_url_path_prefix(
     monkeypatch,
     base_url,
     expected_logo_url,
+    expected_manage_url,
     expected_schedule_url,
 ):
     monkeypatch.setenv("BASE_URL", base_url)
@@ -476,6 +489,7 @@ def test_google_wallet_payload_urls_respect_base_url_path_prefix(
         payload = google_wallet_member_object_payload(member)
 
     assert payload["logo"]["sourceUri"]["uri"] == expected_logo_url
+    assert payload["linksModuleData"]["uris"][0]["uri"] == expected_manage_url
     assert payload["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"] == expected_schedule_url
 
 
@@ -497,7 +511,60 @@ def test_google_wallet_payload_avoids_duplicate_manage_your_package_link(client,
 
         payload = google_wallet_member_object_payload(member)
 
-    assert "linksModuleData" not in payload
+    manage_links = [
+        link
+        for link in payload["linksModuleData"]["uris"]
+        if link.get("id") == "manage_package" or link.get("description") == "Manage Your Package"
+    ]
+    assert len(manage_links) == 1
+    assert payload["appLinkData"]["displayText"]["defaultValue"]["value"] == "Schedule Oil Change"
+
+
+def test_google_wallet_class_is_ensured_once_per_process_for_same_class_id(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Class Ensure Once",
+            email="class-ensure-once@example.com",
+            member_id="COC-00920",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="class-ensure-once-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    token_fetches = {"count": 0}
+    class_patch_calls = {"count": 0}
+
+    def fake_access_token():
+        token_fetches["count"] += 1
+        return "cached-wallet-token"
+
+    def fake_api_call(method, endpoint, payload=None, access_token=None):
+        if endpoint.endswith("/genericClass/issuer123.class123") and method == "PATCH":
+            class_patch_calls["count"] += 1
+            return 200, {}
+        if endpoint.endswith("/genericObject/issuer123.carnova_coc-00920") and method == "PATCH":
+            return 200, {}
+        return 201, {}
+
+    monkeypatch.setenv("GOOGLE_WALLET_ISSUER_ID", "issuer123")
+    monkeypatch.setenv("GOOGLE_WALLET_CLASS_ID", "class123")
+    monkeypatch.setattr("app.GOOGLE_WALLET_ENSURED_CLASS_IDS", set())
+    monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
+    monkeypatch.setattr("app.google_wallet_api_call", fake_api_call)
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member.query.get(member_id)
+        assert google_wallet_upsert_member_object(member) is True
+        assert google_wallet_upsert_member_object(member) is True
+
+    assert class_patch_calls["count"] == 1
+    assert token_fetches["count"] == 2
 
 
 @pytest.mark.parametrize(

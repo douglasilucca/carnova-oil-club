@@ -2207,6 +2207,7 @@ def member_public_url(member):
 
 
 GOOGLE_WALLET_SCOPE = "https://www.googleapis.com/auth/wallet_object.issuer"
+GOOGLE_WALLET_ENSURED_CLASS_IDS = set()
 
 
 def google_wallet_is_configured():
@@ -2307,6 +2308,7 @@ def google_wallet_class_payload():
 def google_wallet_member_object_payload(member):
     expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
     logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-logo.png"))
+    manage_package_url = google_wallet_public_https_url(url_for("member_public", token=member.token))
     schedule_oil_change_url = google_wallet_public_https_url(url_for("public_new_appointment", token=member.token))
 
     payload = {
@@ -2363,6 +2365,17 @@ def google_wallet_member_object_payload(member):
             },
         }
 
+    if manage_package_url:
+        payload["linksModuleData"] = {
+            "uris": [
+                {
+                    "uri": manage_package_url,
+                    "description": "Manage Your Package",
+                    "id": "manage_package",
+                }
+            ]
+        }
+
     if schedule_oil_change_url:
         payload["appLinkData"] = {
             "displayText": {
@@ -2382,6 +2395,42 @@ def google_wallet_member_object_payload(member):
         }
 
     return payload
+
+
+def ensure_google_wallet_class(access_token):
+    class_id_value = google_wallet_class_id()
+    if not class_id_value:
+        return False
+
+    if class_id_value in GOOGLE_WALLET_ENSURED_CLASS_IDS:
+        return True
+
+    class_payload = google_wallet_class_payload()
+    base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
+    class_id = parse.quote(class_id_value, safe="")
+    class_url = f"{base_url}/genericClass/{class_id}"
+
+    class_patch_status, _ = google_wallet_api_call("PATCH", class_url, class_payload, access_token=access_token)
+    if class_patch_status in {200, 201}:
+        GOOGLE_WALLET_ENSURED_CLASS_IDS.add(class_id_value)
+        return True
+
+    if class_patch_status == 404:
+        class_create_status, _ = google_wallet_api_call(
+            "POST",
+            f"{base_url}/genericClass",
+            class_payload,
+            access_token=access_token,
+        )
+        if class_create_status in {200, 201, 409}:
+            GOOGLE_WALLET_ENSURED_CLASS_IDS.add(class_id_value)
+            return True
+
+        print(f"Google Wallet class create failed: status={class_create_status}")
+        return False
+
+    print(f"Google Wallet class update failed: status={class_patch_status}")
+    return False
 
 
 def google_wallet_access_token():
@@ -2428,26 +2477,11 @@ def google_wallet_api_call(method, endpoint, payload=None, access_token=None):
 def google_wallet_upsert_member_object(member, access_token=None):
     object_id = parse.quote(google_wallet_object_id(member), safe="")
     payload = google_wallet_member_object_payload(member)
-    class_payload = google_wallet_class_payload()
     base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
-    class_id = parse.quote(google_wallet_class_id(), safe="")
-    class_url = f"{base_url}/genericClass/{class_id}"
     object_url = f"{base_url}/genericObject/{object_id}"
     token_value = access_token or google_wallet_access_token()
 
-    class_patch_status, _ = google_wallet_api_call("PATCH", class_url, class_payload, access_token=token_value)
-    if class_patch_status not in {200, 201}:
-        if class_patch_status == 404:
-            class_create_status, _ = google_wallet_api_call(
-                "POST",
-                f"{base_url}/genericClass",
-                class_payload,
-                access_token=token_value,
-            )
-            if class_create_status not in {200, 201, 409}:
-                print(f"Google Wallet class create failed: status={class_create_status}")
-        else:
-            print(f"Google Wallet class update failed: status={class_patch_status}")
+    ensure_google_wallet_class(token_value)
 
     patch_status, _ = google_wallet_api_call("PATCH", object_url, payload, access_token=token_value)
     if patch_status in {200, 201}:
