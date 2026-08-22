@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 import stripe
@@ -20,6 +20,7 @@ from app import (
     google_wallet_upsert_member_object,
     run_all_reminders,
     run_appointment_reminders,
+    resolve_appointment_reminder_timezone,
     run_renewal_reminders,
     run_unused_benefit_reminders,
     send_unused_benefit_reminder_email,
@@ -1805,3 +1806,61 @@ def test_appointment_morning_reminder_email_includes_expected_details_and_links(
     assert "2022 Honda Civic" in captured["text_body"]
     assert f"/m/{member.token}" in captured["text_body"]
     assert f"/m/{member.token}/appointments/new" in captured["text_body"]
+
+
+def test_appointment_timezone_valid_america_new_york(monkeypatch):
+    monkeypatch.setenv("APPOINTMENT_REMINDER_TIMEZONE", "America/New_York")
+    tz = resolve_appointment_reminder_timezone()
+
+    winter_utc = datetime(2026, 1, 15, 13, 0, tzinfo=timezone.utc)
+    summer_utc = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+    winter_local = winter_utc.astimezone(tz)
+    summer_local = summer_utc.astimezone(tz)
+
+    assert winter_local.hour == 8
+    assert summer_local.hour == 8
+
+
+def test_appointment_timezone_invalid_falls_back_to_eastern(monkeypatch):
+    monkeypatch.setenv("APPOINTMENT_REMINDER_TIMEZONE", "Mars/Phobos")
+    tz = resolve_appointment_reminder_timezone()
+
+    winter_utc = datetime(2026, 1, 15, 13, 0, tzinfo=timezone.utc)
+    summer_utc = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+    winter_local = winter_utc.astimezone(tz)
+    summer_local = summer_utc.astimezone(tz)
+
+    assert winter_local.hour == 8
+    assert summer_local.hour == 8
+
+
+def test_appointment_morning_reminder_targets_8am_eastern_when_timezone_invalid(client, monkeypatch):
+    appointment_date = date(2026, 1, 15)
+    member = _create_member_for_reminders("appt-eastern-target@example.com", expiration_days=180)
+    db.session.add(
+        Appointment(
+            member_id=member.id,
+            appointment_date=appointment_date,
+            appointment_time=time(10, 0),
+            status="scheduled",
+            service_type="Oil Change",
+        )
+    )
+    db.session.commit()
+
+    monkeypatch.setenv("APPOINTMENT_REMINDER_TIMEZONE", "Invalid/Timezone")
+    monkeypatch.setenv("APPOINTMENT_REMINDER_MORNING_HOUR", "8")
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    before_summary = run_appointment_reminders(
+        reference_datetime=datetime(2026, 1, 15, 12, 59, tzinfo=timezone.utc)
+    )
+    after_summary = run_appointment_reminders(
+        reference_datetime=datetime(2026, 1, 15, 13, 1, tzinfo=timezone.utc)
+    )
+
+    assert before_summary["sent"] == 0
+    assert before_summary["skip_reasons"]["before_morning_send_time"] == 1
+    assert after_summary["sent"] == 1

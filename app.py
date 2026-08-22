@@ -3,7 +3,7 @@ import json
 import os
 import re
 import secrets
-from datetime import date, datetime, timedelta, time, timezone
+from datetime import date, datetime, timedelta, time, tzinfo
 from functools import wraps
 from io import BytesIO, StringIO
 from urllib import error as urllib_error, parse, request as urllib_request
@@ -699,13 +699,62 @@ Email: info@carnovaoil.com
         return send_smtp_email(member.email, subject, text_body, html_body)
 
 
+class EasternFallbackTz(tzinfo):
+    """US Eastern fallback with DST rules when IANA zone data is unavailable."""
+
+    std_offset = timedelta(hours=-5)
+    dst_offset = timedelta(hours=-4)
+
+    @staticmethod
+    def _first_sunday_on_or_after(day):
+        days_to_go = (6 - day.weekday()) % 7
+        return day + timedelta(days=days_to_go)
+
+    def _dst_bounds(self, year):
+        march_8 = datetime(year, 3, 8)
+        november_1 = datetime(year, 11, 1)
+        dst_start = self._first_sunday_on_or_after(march_8).replace(hour=2)
+        dst_end = self._first_sunday_on_or_after(november_1).replace(hour=2)
+        return dst_start, dst_end
+
+    def _is_dst(self, dt):
+        if dt is None:
+            return False
+        naive = dt.replace(tzinfo=None)
+        dst_start, dst_end = self._dst_bounds(naive.year)
+        return dst_start <= naive < dst_end
+
+    def utcoffset(self, dt):
+        return self.dst_offset if self._is_dst(dt) else self.std_offset
+
+    def dst(self, dt):
+        return timedelta(hours=1) if self._is_dst(dt) else timedelta(0)
+
+    def tzname(self, dt):
+        return "EDT" if self._is_dst(dt) else "EST"
+
+
 def resolve_appointment_reminder_timezone():
-    tz_name = os.environ.get("APPOINTMENT_REMINDER_TIMEZONE", "America/New_York").strip() or "America/New_York"
+    default_tz_name = "America/New_York"
+    configured_tz_name = os.environ.get("APPOINTMENT_REMINDER_TIMEZONE", default_tz_name).strip() or default_tz_name
+
     try:
-        return ZoneInfo(tz_name)
+        return ZoneInfo(configured_tz_name)
     except ZoneInfoNotFoundError:
-        print(f"Invalid APPOINTMENT_REMINDER_TIMEZONE: {tz_name}. Falling back to UTC offset.")
-        return timezone.utc
+        if configured_tz_name != default_tz_name:
+            print(
+                f"Invalid APPOINTMENT_REMINDER_TIMEZONE: {configured_tz_name}. "
+                f"Falling back to {default_tz_name}."
+            )
+
+    for fallback_name in (default_tz_name, "US/Eastern", "EST5EDT"):
+        try:
+            return ZoneInfo(fallback_name)
+        except ZoneInfoNotFoundError:
+            continue
+
+    print("Timezone data unavailable; using DST-aware Eastern fallback timezone.")
+    return EasternFallbackTz()
 
 
 def resolve_appointment_reminder_morning_hour():
