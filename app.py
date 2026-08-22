@@ -2257,7 +2257,26 @@ def google_wallet_public_https_url(path):
     if parsed_base.scheme != "https" or not parsed_base.netloc:
         return ""
 
-    return f"https://{parsed_base.netloc}{path}"
+    parsed_target = parse.urlsplit(path or "")
+    if parsed_target.scheme or parsed_target.netloc:
+        return ""
+
+    base_path = parsed_base.path.rstrip("/")
+    target_path = "/" + (parsed_target.path or "").lstrip("/")
+
+    if base_path and (target_path == base_path or target_path.startswith(f"{base_path}/")):
+        final_path = target_path
+    elif base_path:
+        final_path = f"{base_path}{target_path}"
+    else:
+        final_path = target_path
+
+    return parse.urlunsplit(("https", parsed_base.netloc, final_path, parsed_target.query, parsed_target.fragment))
+
+
+def google_wallet_remaining_changes_text(remaining_changes):
+    noun = "OIL CHANGE" if remaining_changes == 1 else "OIL CHANGES"
+    return f"{remaining_changes} {noun} REMAINING"
 
 
 def google_wallet_member_object_payload(member):
@@ -2277,7 +2296,7 @@ def google_wallet_member_object_payload(member):
             {
                 "id": "remaining_changes",
                 "header": "Oil Change Balance",
-                "body": f"{member.remaining_changes} OIL CHANGES REMAINING",
+                "body": google_wallet_remaining_changes_text(member.remaining_changes),
             },
             {
                 "id": "total_changes",

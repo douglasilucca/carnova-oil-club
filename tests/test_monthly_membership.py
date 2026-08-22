@@ -415,6 +415,91 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
     assert uris["schedule_oil_change"]["uri"] == "https://cards.carnova.test/m/wallet-payload-token/appointments/new"
 
 
+@pytest.mark.parametrize(
+    ("base_url", "expected_logo_url", "expected_manage_url", "expected_schedule_url"),
+    [
+        (
+            "https://example.com",
+            "https://example.com/static/carnova-logo.png",
+            "https://example.com/m/wallet-payload-token",
+            "https://example.com/m/wallet-payload-token/appointments/new",
+        ),
+        (
+            "https://example.com/carnova",
+            "https://example.com/carnova/static/carnova-logo.png",
+            "https://example.com/carnova/m/wallet-payload-token",
+            "https://example.com/carnova/m/wallet-payload-token/appointments/new",
+        ),
+    ],
+)
+def test_google_wallet_payload_urls_respect_base_url_path_prefix(
+    client,
+    monkeypatch,
+    base_url,
+    expected_logo_url,
+    expected_manage_url,
+    expected_schedule_url,
+):
+    monkeypatch.setenv("BASE_URL", base_url)
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member(
+            name="Wallet URL Prefix Member",
+            email="wallet-prefix@example.com",
+            member_id="COC-00917",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=5,
+            token="wallet-payload-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+
+        payload = google_wallet_member_object_payload(member)
+
+    assert payload["logo"]["sourceUri"]["uri"] == expected_logo_url
+
+    uris = {item["id"]: item for item in payload["linksModuleData"]["uris"]}
+    assert uris["manage_package"]["uri"] == expected_manage_url
+    assert uris["schedule_oil_change"]["uri"] == expected_schedule_url
+
+
+@pytest.mark.parametrize(
+    ("remaining_changes", "expected_text"),
+    [
+        (0, "0 OIL CHANGES REMAINING"),
+        (1, "1 OIL CHANGE REMAINING"),
+        (2, "2 OIL CHANGES REMAINING"),
+        (3, "3 OIL CHANGES REMAINING"),
+    ],
+)
+def test_google_wallet_payload_remaining_changes_text_singular_plural(
+    client,
+    monkeypatch,
+    remaining_changes,
+    expected_text,
+):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member(
+            name="Wallet Balance Grammar",
+            email="wallet-balance-grammar@example.com",
+            member_id="COC-00918",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=remaining_changes,
+            total_changes=5,
+            token="wallet-balance-grammar-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+
+        payload = google_wallet_member_object_payload(member)
+
+    assert payload["textModulesData"][0]["id"] == "remaining_changes"
+    assert payload["textModulesData"][0]["body"] == expected_text
+
+
 def test_google_wallet_object_id_is_deterministic_for_existing_member(client, monkeypatch):
     monkeypatch.setenv("GOOGLE_WALLET_ISSUER_ID", "issuer456")
 
