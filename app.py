@@ -2248,9 +2248,44 @@ def google_wallet_member_state(member):
     return "INACTIVE"
 
 
+def google_wallet_public_https_url(path):
+    base_url = resolve_public_base_url()
+    if not base_url:
+        return ""
+
+    parsed_base = parse.urlsplit(base_url)
+    if parsed_base.scheme != "https" or not parsed_base.netloc:
+        return ""
+
+    parsed_target = parse.urlsplit(path or "")
+    if parsed_target.scheme or parsed_target.netloc:
+        return ""
+
+    base_path = parsed_base.path.rstrip("/")
+    target_path = "/" + (parsed_target.path or "").lstrip("/")
+
+    if base_path and (target_path == base_path or target_path.startswith(f"{base_path}/")):
+        final_path = target_path
+    elif base_path:
+        final_path = f"{base_path}{target_path}"
+    else:
+        final_path = target_path
+
+    return parse.urlunsplit(("https", parsed_base.netloc, final_path, parsed_target.query, parsed_target.fragment))
+
+
+def google_wallet_remaining_changes_text(remaining_changes):
+    noun = "OIL CHANGE" if remaining_changes == 1 else "OIL CHANGES"
+    return f"{remaining_changes} {noun} REMAINING"
+
+
 def google_wallet_member_object_payload(member):
     expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
-    return {
+    logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-logo.png"))
+    manage_package_url = google_wallet_public_https_url(url_for("member_public", token=member.token))
+    schedule_oil_change_url = google_wallet_public_https_url(url_for("public_new_appointment", token=member.token))
+
+    payload = {
         "id": google_wallet_object_id(member),
         "classId": google_wallet_class_id(),
         "state": google_wallet_member_state(member),
@@ -2260,8 +2295,8 @@ def google_wallet_member_object_payload(member):
         "textModulesData": [
             {
                 "id": "remaining_changes",
-                "header": "Remaining Oil Changes",
-                "body": str(member.remaining_changes),
+                "header": "Oil Change Balance",
+                "body": google_wallet_remaining_changes_text(member.remaining_changes),
             },
             {
                 "id": "total_changes",
@@ -2290,6 +2325,42 @@ def google_wallet_member_object_payload(member):
             }
         },
     }
+
+    if logo_url:
+        payload["logo"] = {
+            "sourceUri": {
+                "uri": logo_url,
+            },
+            "contentDescription": {
+                "defaultValue": {
+                    "language": "en-US",
+                    "value": "Carnova Oil logo",
+                }
+            },
+        }
+
+    links = []
+    if manage_package_url:
+        links.append(
+            {
+                "uri": manage_package_url,
+                "description": "Manage Your Package",
+                "id": "manage_package",
+            }
+        )
+    if schedule_oil_change_url:
+        links.append(
+            {
+                "uri": schedule_oil_change_url,
+                "description": "Schedule Oil Change",
+                "id": "schedule_oil_change",
+            }
+        )
+
+    if links:
+        payload["linksModuleData"] = {"uris": links}
+
+    return payload
 
 
 def google_wallet_access_token():
