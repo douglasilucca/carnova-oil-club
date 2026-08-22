@@ -2248,9 +2248,25 @@ def google_wallet_member_state(member):
     return "INACTIVE"
 
 
+def google_wallet_public_https_url(path):
+    base_url = resolve_public_base_url()
+    if not base_url:
+        return ""
+
+    parsed_base = parse.urlsplit(base_url)
+    if parsed_base.scheme != "https" or not parsed_base.netloc:
+        return ""
+
+    return f"https://{parsed_base.netloc}{path}"
+
+
 def google_wallet_member_object_payload(member):
     expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
-    return {
+    logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-logo.png"))
+    manage_package_url = google_wallet_public_https_url(url_for("member_public", token=member.token))
+    schedule_oil_change_url = google_wallet_public_https_url(url_for("public_new_appointment", token=member.token))
+
+    payload = {
         "id": google_wallet_object_id(member),
         "classId": google_wallet_class_id(),
         "state": google_wallet_member_state(member),
@@ -2260,8 +2276,8 @@ def google_wallet_member_object_payload(member):
         "textModulesData": [
             {
                 "id": "remaining_changes",
-                "header": "Remaining Oil Changes",
-                "body": str(member.remaining_changes),
+                "header": "Oil Change Balance",
+                "body": f"{member.remaining_changes} OIL CHANGES REMAINING",
             },
             {
                 "id": "total_changes",
@@ -2290,6 +2306,42 @@ def google_wallet_member_object_payload(member):
             }
         },
     }
+
+    if logo_url:
+        payload["logo"] = {
+            "sourceUri": {
+                "uri": logo_url,
+            },
+            "contentDescription": {
+                "defaultValue": {
+                    "language": "en-US",
+                    "value": "Carnova Oil logo",
+                }
+            },
+        }
+
+    links = []
+    if manage_package_url:
+        links.append(
+            {
+                "uri": manage_package_url,
+                "description": "Manage Your Package",
+                "id": "manage_package",
+            }
+        )
+    if schedule_oil_change_url:
+        links.append(
+            {
+                "uri": schedule_oil_change_url,
+                "description": "Schedule Oil Change",
+                "id": "schedule_oil_change",
+            }
+        )
+
+    if links:
+        payload["linksModuleData"] = {"uris": links}
+
+    return payload
 
 
 def google_wallet_access_token():

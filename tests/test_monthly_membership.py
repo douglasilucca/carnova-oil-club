@@ -17,6 +17,8 @@ from app import (
     db,
     monthly_membership_defaults,
     google_wallet_api_call,
+    google_wallet_member_object_payload,
+    google_wallet_object_id,
     google_wallet_upsert_member_object,
     run_all_reminders,
     run_appointment_reminders,
@@ -379,6 +381,61 @@ def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, mo
         assert google_wallet_upsert_member_object(member) is True
     assert token_fetches["count"] == 1
     assert api_access_tokens == ["cached-wallet-token", "cached-wallet-token"]
+
+
+def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client, monkeypatch):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    monkeypatch.setenv("GOOGLE_WALLET_ISSUER_ID", "issuer123")
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member(
+            name="Wallet Payload Member",
+            email="wallet-payload@example.com",
+            member_id="COC-00915",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=5,
+            token="wallet-payload-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+
+        payload = google_wallet_member_object_payload(member)
+
+    assert payload["id"] == "issuer123.carnova_coc-00915"
+    assert payload["textModulesData"][0]["id"] == "remaining_changes"
+    assert payload["textModulesData"][0]["body"] == "3 OIL CHANGES REMAINING"
+
+    assert payload["logo"]["sourceUri"]["uri"] == "https://cards.carnova.test/static/carnova-logo.png"
+
+    uris = {item["id"]: item for item in payload["linksModuleData"]["uris"]}
+    assert uris["manage_package"]["description"] == "Manage Your Package"
+    assert uris["manage_package"]["uri"] == "https://cards.carnova.test/m/wallet-payload-token"
+    assert uris["schedule_oil_change"]["description"] == "Schedule Oil Change"
+    assert uris["schedule_oil_change"]["uri"] == "https://cards.carnova.test/m/wallet-payload-token/appointments/new"
+
+
+def test_google_wallet_object_id_is_deterministic_for_existing_member(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_WALLET_ISSUER_ID", "issuer456")
+
+    member = Member(
+        name="Deterministic Wallet",
+        email="deterministic-wallet@example.com",
+        member_id="COC-00916",
+        expiration_date=date.today() + timedelta(days=365),
+        remaining_changes=3,
+        total_changes=3,
+        token="deterministic-wallet-token",
+        plan_name="Monthly Membership",
+        subscription_status="active",
+    )
+
+    first_object_id = google_wallet_object_id(member)
+    member.remaining_changes = 1
+    second_object_id = google_wallet_object_id(member)
+
+    assert first_object_id == "issuer456.carnova_coc-00916"
+    assert second_object_id == first_object_id
 
 
 def test_google_wallet_api_call_uses_provided_token_without_fetch(client, monkeypatch):
@@ -845,10 +902,11 @@ def test_redeem_calls_wallet_sync_after_commit(client, monkeypatch):
         follow_redirects=True,
     )
 
-    called = {"count": 0}
+    called = {"count": 0, "remaining_changes": []}
 
-    def fake_sync(_member):
+    def fake_sync(updated_member):
         called["count"] += 1
+        called["remaining_changes"].append(updated_member.remaining_changes)
         return True
 
     monkeypatch.setattr("app.sync_member_google_wallet_object", fake_sync)
@@ -862,6 +920,7 @@ def test_redeem_calls_wallet_sync_after_commit(client, monkeypatch):
     assert response.status_code == 200
     assert b"Oil change redeemed successfully." in response.data
     assert called["count"] == 1
+    assert called["remaining_changes"] == [1]
 
 
 def test_undo_calls_wallet_sync_after_commit(client, monkeypatch):
@@ -889,10 +948,11 @@ def test_undo_calls_wallet_sync_after_commit(client, monkeypatch):
         follow_redirects=True,
     )
 
-    called = {"count": 0}
+    called = {"count": 0, "remaining_changes": []}
 
-    def fake_sync(_member):
+    def fake_sync(updated_member):
         called["count"] += 1
+        called["remaining_changes"].append(updated_member.remaining_changes)
         return True
 
     monkeypatch.setattr("app.sync_member_google_wallet_object", fake_sync)
@@ -902,6 +962,7 @@ def test_undo_calls_wallet_sync_after_commit(client, monkeypatch):
     assert response.status_code == 200
     assert b"Last redemption was undone." in response.data
     assert called["count"] == 1
+    assert called["remaining_changes"] == [1]
 
 
 def test_edit_member_calls_wallet_sync_after_commit(client, monkeypatch):
