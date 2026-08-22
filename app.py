@@ -1193,8 +1193,12 @@ def public_member_billing_portal(token):
 def public_member_google_wallet_add(token):
     member = Member.query.filter_by(token=token).first_or_404()
     save_url = sync_member_google_wallet_save_url(member)
-    if save_url:
+    if google_wallet_save_url_is_safe(save_url):
         return redirect(save_url)
+
+    if save_url:
+        print(f"Google Wallet save URL validation failed for {member.member_id}")
+
     flash("Google Wallet is unavailable right now. Please try again later.", "error")
     return redirect(url_for("member_public", token=member.token))
 
@@ -2147,6 +2151,20 @@ def google_wallet_save_url(member):
     if isinstance(token, bytes):
         token = token.decode("utf-8")
     return f"https://pay.google.com/gp/v/save/{token}"
+
+
+def google_wallet_save_url_is_safe(url):
+    if not url or not isinstance(url, str):
+        return False
+
+    parsed = parse.urlsplit(url)
+    if parsed.scheme != "https":
+        return False
+    if parsed.netloc.lower() != "pay.google.com":
+        return False
+    if not parsed.path.startswith("/gp/v/save/"):
+        return False
+    return True
 
 
 def sync_member_google_wallet_object(member):
