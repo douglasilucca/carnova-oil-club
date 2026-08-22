@@ -2207,6 +2207,7 @@ def member_public_url(member):
 
 
 GOOGLE_WALLET_SCOPE = "https://www.googleapis.com/auth/wallet_object.issuer"
+GOOGLE_WALLET_ENSURED_CLASS_IDS = set()
 
 
 def google_wallet_is_configured():
@@ -2279,6 +2280,31 @@ def google_wallet_remaining_changes_text(remaining_changes):
     return f"{remaining_changes} {noun} REMAINING"
 
 
+def google_wallet_class_payload():
+    return {
+        "id": google_wallet_class_id(),
+        "classTemplateInfo": {
+            "cardTemplateOverride": {
+                "cardRowTemplateInfos": [
+                    {
+                        "oneItem": {
+                            "item": {
+                                "firstValue": {
+                                    "fields": [
+                                        {
+                                            "fieldPath": 'object.textModulesData["remaining_changes"]',
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+    }
+
+
 def google_wallet_member_object_payload(member):
     expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
     logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-logo.png"))
@@ -2339,28 +2365,72 @@ def google_wallet_member_object_payload(member):
             },
         }
 
-    links = []
     if manage_package_url:
-        links.append(
-            {
-                "uri": manage_package_url,
-                "description": "Manage Your Package",
-                "id": "manage_package",
-            }
-        )
-    if schedule_oil_change_url:
-        links.append(
-            {
-                "uri": schedule_oil_change_url,
-                "description": "Schedule Oil Change",
-                "id": "schedule_oil_change",
-            }
-        )
+        payload["linksModuleData"] = {
+            "uris": [
+                {
+                    "uri": manage_package_url,
+                    "description": "Manage Your Package",
+                    "id": "manage_package",
+                }
+            ]
+        }
 
-    if links:
-        payload["linksModuleData"] = {"uris": links}
+    if schedule_oil_change_url:
+        payload["appLinkData"] = {
+            "displayText": {
+                "defaultValue": {
+                    "language": "en-US",
+                    "value": "Schedule Oil Change",
+                }
+            },
+            "webAppLinkInfo": {
+                "appTarget": {
+                    "targetUri": {
+                        "uri": schedule_oil_change_url,
+                        "description": "Schedule Oil Change",
+                    }
+                }
+            },
+        }
 
     return payload
+
+
+def ensure_google_wallet_class(access_token):
+    class_id_value = google_wallet_class_id()
+    if not class_id_value:
+        return False
+
+    if class_id_value in GOOGLE_WALLET_ENSURED_CLASS_IDS:
+        return True
+
+    class_payload = google_wallet_class_payload()
+    base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
+    class_id = parse.quote(class_id_value, safe="")
+    class_url = f"{base_url}/genericClass/{class_id}"
+
+    class_patch_status, _ = google_wallet_api_call("PATCH", class_url, class_payload, access_token=access_token)
+    if class_patch_status in {200, 201}:
+        GOOGLE_WALLET_ENSURED_CLASS_IDS.add(class_id_value)
+        return True
+
+    if class_patch_status == 404:
+        class_create_status, _ = google_wallet_api_call(
+            "POST",
+            f"{base_url}/genericClass",
+            class_payload,
+            access_token=access_token,
+        )
+        if class_create_status in {200, 201, 409}:
+            GOOGLE_WALLET_ENSURED_CLASS_IDS.add(class_id_value)
+            return True
+
+        print(f"Google Wallet class create failed: status={class_create_status}")
+        return False
+
+    print(f"Google Wallet class update failed: status={class_patch_status}")
+    return False
 
 
 def google_wallet_access_token():
@@ -2410,6 +2480,8 @@ def google_wallet_upsert_member_object(member, access_token=None):
     base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
     object_url = f"{base_url}/genericObject/{object_id}"
     token_value = access_token or google_wallet_access_token()
+
+    ensure_google_wallet_class(token_value)
 
     patch_status, _ = google_wallet_api_call("PATCH", object_url, payload, access_token=token_value)
     if patch_status in {200, 201}:
