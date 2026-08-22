@@ -2074,10 +2074,11 @@ def google_wallet_service_account_email():
     return credentials.service_account_email
 
 
-def google_wallet_api_call(method, endpoint, payload=None):
+def google_wallet_api_call(method, endpoint, payload=None, access_token=None):
     body = None
+    token_value = access_token or google_wallet_access_token()
     headers = {
-        "Authorization": f"Bearer {google_wallet_access_token()}",
+        "Authorization": f"Bearer {token_value}",
     }
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
@@ -2098,13 +2099,14 @@ def google_wallet_api_call(method, endpoint, payload=None):
         return error.code, parsed_error
 
 
-def google_wallet_upsert_member_object(member):
+def google_wallet_upsert_member_object(member, access_token=None):
     object_id = parse.quote(google_wallet_object_id(member), safe="")
     payload = google_wallet_member_object_payload(member)
     base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
     object_url = f"{base_url}/genericObject/{object_id}"
+    token_value = access_token or google_wallet_access_token()
 
-    patch_status, _ = google_wallet_api_call("PATCH", object_url, payload)
+    patch_status, _ = google_wallet_api_call("PATCH", object_url, payload, access_token=token_value)
     if patch_status in {200, 201}:
         return True
 
@@ -2112,7 +2114,7 @@ def google_wallet_upsert_member_object(member):
         print(f"Google Wallet update failed for {member.member_id}: status={patch_status}")
         return False
 
-    create_status, _ = google_wallet_api_call("POST", f"{base_url}/genericObject", payload)
+    create_status, _ = google_wallet_api_call("POST", f"{base_url}/genericObject", payload, access_token=token_value)
     if create_status in {200, 201, 409}:
         return True
 

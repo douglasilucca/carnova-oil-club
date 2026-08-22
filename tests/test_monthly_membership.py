@@ -16,6 +16,8 @@ from app import (
     current_member_status,
     db,
     monthly_membership_defaults,
+    google_wallet_api_call,
+    google_wallet_upsert_member_object,
     run_all_reminders,
     run_renewal_reminders,
     run_unused_benefit_reminders,
@@ -280,6 +282,88 @@ def test_public_google_wallet_add_failure_redirects_back_to_member_card(client, 
     assert response.status_code == 200
     assert b"Google Wallet is unavailable right now" in response.data
     assert b"Wallet Member Fallback" in response.data
+
+
+def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Token Reuse Member",
+            email="token-reuse@example.com",
+            member_id="COC-00912",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="token-reuse-member",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    token_fetches = {"count": 0}
+    api_access_tokens = []
+
+    def fake_access_token():
+        token_fetches["count"] += 1
+        return "cached-wallet-token"
+
+    def fake_api_call(method, endpoint, payload=None, access_token=None):
+        api_access_tokens.append(access_token)
+        if method == "PATCH":
+            return 404, {}
+        return 201, {}
+
+    monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
+    monkeypatch.setattr("app.google_wallet_api_call", fake_api_call)
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member.query.get(member_id)
+        assert google_wallet_upsert_member_object(member) is True
+    assert token_fetches["count"] == 1
+    assert api_access_tokens == ["cached-wallet-token", "cached-wallet-token"]
+
+
+def test_google_wallet_api_call_uses_provided_token_without_fetch(client, monkeypatch):
+    token_fetches = {"count": 0}
+    seen = {"authorization": ""}
+
+    class FakeResponse:
+        def __init__(self, request_obj):
+            self.request_obj = request_obj
+            self.status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_access_token():
+        token_fetches["count"] += 1
+        return "should-not-be-used"
+
+    def fake_urlopen(request_obj, timeout=10):
+        seen["authorization"] = request_obj.headers.get("Authorization", "")
+        return FakeResponse(request_obj)
+
+    monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
+    monkeypatch.setattr("app.urllib_request.urlopen", fake_urlopen)
+
+    status, payload = google_wallet_api_call(
+        "PATCH",
+        "https://walletobjects.googleapis.com/walletobjects/v1/genericObject/test",
+        payload={"id": "test"},
+        access_token="provided-token",
+    )
+
+    assert status == 200
+    assert payload == {}
+    assert seen["authorization"] == "Bearer provided-token"
+    assert token_fetches["count"] == 0
 
 
 def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_button(client, monkeypatch):
