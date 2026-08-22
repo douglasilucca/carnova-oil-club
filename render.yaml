@@ -27,6 +27,34 @@ services:
           name: carnova-oil-club-db
           property: connectionString
 
+  - type: cron
+    name: carnova-oil-club-reminders
+    runtime: python
+    schedule: "5 12,13 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_reminders.py
+    envVars:
+      - key: BASE_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: APPOINTMENT_REMINDER_MORNING_HOUR
+        value: "8"
+      - key: APPOINTMENT_REMINDER_TIMEZONE
+        value: America/New_York
+      - key: DATABASE_URL
+        fromDatabase:
+          name: carnova-oil-club-db
+          property: connectionString
+
 databases:
   - name: carnova-oil-club-db
     databaseName: carnova_oil_club
