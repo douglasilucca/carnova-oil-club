@@ -253,7 +253,7 @@ def test_public_google_wallet_add_redirects_to_save_url(client, monkeypatch):
 
     monkeypatch.setattr("app.sync_member_google_wallet_save_url", lambda _member: "https://pay.google.com/gp/v/save/test-token")
 
-    response = client.get("/m/wallet-member-token/wallet/add", follow_redirects=False)
+    response = client.post("/m/wallet-member-token/wallet/add", follow_redirects=False)
 
     assert response.status_code == 302
     assert response.headers["Location"] == "https://pay.google.com/gp/v/save/test-token"
@@ -277,11 +277,41 @@ def test_public_google_wallet_add_failure_redirects_back_to_member_card(client, 
 
     monkeypatch.setattr("app.sync_member_google_wallet_save_url", lambda _member: None)
 
-    response = client.get("/m/wallet-member-fallback-token/wallet/add", follow_redirects=True)
+    response = client.post("/m/wallet-member-fallback-token/wallet/add", follow_redirects=True)
 
     assert response.status_code == 200
     assert b"Google Wallet is unavailable right now" in response.data
     assert b"Wallet Member Fallback" in response.data
+
+
+def test_public_google_wallet_add_get_does_not_trigger_wallet_sync(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Wallet Member Read Only",
+            email="wallet-read-only@example.com",
+            member_id="COC-00913",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="wallet-member-read-only-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    called = {"value": False}
+
+    def fake_save_url(_member):
+        called["value"] = True
+        return "https://pay.google.com/gp/v/save/test-token"
+
+    monkeypatch.setattr("app.sync_member_google_wallet_save_url", fake_save_url)
+
+    response = client.get("/m/wallet-member-read-only-token/wallet/add", follow_redirects=False)
+
+    assert response.status_code == 405
+    assert called["value"] is False
 
 
 def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, monkeypatch):

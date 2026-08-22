@@ -1189,7 +1189,7 @@ def public_member_billing_portal(token):
     return redirect(url_for("member_public", token=member.token))
 
 
-@app.route("/m/<token>/wallet/add")
+@app.route("/m/<token>/wallet/add", methods=["POST"])
 def public_member_google_wallet_add(token):
     member = Member.query.filter_by(token=token).first_or_404()
     save_url = sync_member_google_wallet_save_url(member)
