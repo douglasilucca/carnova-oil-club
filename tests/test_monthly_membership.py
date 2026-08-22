@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 import stripe
@@ -19,6 +19,7 @@ from app import (
     google_wallet_api_call,
     google_wallet_upsert_member_object,
     run_all_reminders,
+    run_appointment_reminders,
     run_renewal_reminders,
     run_unused_benefit_reminders,
     send_unused_benefit_reminder_email,
@@ -1609,6 +1610,198 @@ def test_reminder_summary_totals_match_reason_counts(client, monkeypatch):
 
     assert summary["renewal"]["skipped"] == sum(summary["renewal"]["skip_reasons"].values())
     assert summary["unused_benefit"]["skipped"] == sum(summary["unused_benefit"]["skip_reasons"].values())
-    assert summary["sent"] == summary["renewal"]["sent"] + summary["unused_benefit"]["sent"]
-    assert summary["failed"] == summary["renewal"]["failed"] + summary["unused_benefit"]["failed"]
-    assert summary["skipped"] == summary["renewal"]["skipped"] + summary["unused_benefit"]["skipped"]
+    assert summary["appointment_morning"]["skipped"] == sum(summary["appointment_morning"]["skip_reasons"].values())
+    assert summary["sent"] == summary["renewal"]["sent"] + summary["unused_benefit"]["sent"] + summary["appointment_morning"]["sent"]
+    assert summary["failed"] == summary["renewal"]["failed"] + summary["unused_benefit"]["failed"] + summary["appointment_morning"]["failed"]
+    assert summary["skipped"] == summary["renewal"]["skipped"] + summary["unused_benefit"]["skipped"] + summary["appointment_morning"]["skipped"]
+
+
+def test_appointment_morning_reminder_sends_on_correct_day(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("appt-morning@example.com", expiration_days=180)
+    db.session.add(
+        Appointment(
+            member_id=member.id,
+            appointment_date=today,
+            appointment_time=time(10, 30),
+            status="scheduled",
+            service_type="Oil Change",
+        )
+    )
+    db.session.commit()
+
+    monkeypatch.setenv("APPOINTMENT_REMINDER_TIMEZONE", "America/New_York")
+    monkeypatch.setenv("APPOINTMENT_REMINDER_MORNING_HOUR", "8")
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(8, 15)))
+
+    assert summary["sent"] == 1
+    log = ReminderLog.query.filter_by(member_id=member.id, reminder_type="appointment_morning").first()
+    assert log is not None
+    assert f"appointment:" in log.reminder_key
+
+
+def test_appointment_morning_reminder_skips_cancelled_completed_no_show(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("appt-status@example.com", expiration_days=180)
+    for status_value in ["cancelled", "completed", "no_show"]:
+        db.session.add(
+            Appointment(
+                member_id=member.id,
+                appointment_date=today,
+                appointment_time=time(11, 0),
+                status=status_value,
+                service_type="Oil Change",
+            )
+        )
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+    summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(9, 0)))
+
+    assert summary["sent"] == 0
+    assert summary["skip_reasons"]["status_not_eligible"] == 3
+    assert ReminderLog.query.filter_by(reminder_type="appointment_morning").count() == 0
+
+
+def test_appointment_morning_reminder_prevents_duplicates(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("appt-dup@example.com", expiration_days=180)
+    appointment = Appointment(
+        member_id=member.id,
+        appointment_date=today,
+        appointment_time=time(9, 45),
+        status="confirmed",
+        service_type="Oil Change",
+    )
+    db.session.add(appointment)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+
+    first_summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(8, 30)))
+    second_summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(9, 30)))
+
+    assert first_summary["sent"] == 1
+    assert second_summary["sent"] == 0
+    assert second_summary["skip_reasons"]["duplicate_reminder"] == 1
+    assert ReminderLog.query.filter_by(member_id=member.id, reminder_type="appointment_morning").count() == 1
+
+
+def test_appointment_morning_reminders_keep_multiple_member_appointments_independent(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("appt-multi@example.com", expiration_days=180)
+    first = Appointment(
+        member_id=member.id,
+        appointment_date=today,
+        appointment_time=time(10, 0),
+        status="scheduled",
+        service_type="Oil Change",
+    )
+    second = Appointment(
+        member_id=member.id,
+        appointment_date=today,
+        appointment_time=time(14, 0),
+        status="confirmed",
+        service_type="Oil Change",
+    )
+    db.session.add(first)
+    db.session.add(second)
+    db.session.commit()
+
+    monkeypatch.setattr("app.send_smtp_email", lambda *args, **kwargs: True)
+    summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(8, 45)))
+
+    assert summary["sent"] == 2
+    keys = [
+        item.reminder_key
+        for item in ReminderLog.query.filter_by(member_id=member.id, reminder_type="appointment_morning").all()
+    ]
+    assert any(f"appointment:{first.id}:" in key for key in keys)
+    assert any(f"appointment:{second.id}:" in key for key in keys)
+
+
+def test_appointment_morning_reminder_email_failure_is_non_blocking(client, monkeypatch):
+    today = date.today()
+    first_member = _create_member_for_reminders("appt-fail-1@example.com", expiration_days=180)
+    second_member = _create_member_for_reminders("appt-fail-2@example.com", expiration_days=180)
+
+    db.session.add(
+        Appointment(
+            member_id=first_member.id,
+            appointment_date=today,
+            appointment_time=time(9, 0),
+            status="scheduled",
+            service_type="Oil Change",
+        )
+    )
+    db.session.add(
+        Appointment(
+            member_id=second_member.id,
+            appointment_date=today,
+            appointment_time=time(10, 0),
+            status="scheduled",
+            service_type="Oil Change",
+        )
+    )
+    db.session.commit()
+
+    def fake_send_smtp_email(recipient, *_args, **_kwargs):
+        return recipient != "appt-fail-1@example.com"
+
+    monkeypatch.setattr("app.send_smtp_email", fake_send_smtp_email)
+
+    summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(8, 50)))
+
+    assert summary["sent"] == 1
+    assert summary["failed"] == 1
+    assert ReminderLog.query.filter_by(reminder_type="appointment_morning").count() == 1
+
+
+def test_appointment_morning_reminder_email_includes_expected_details_and_links(client, monkeypatch):
+    today = date.today()
+    member = _create_member_for_reminders("appt-email-details@example.com", expiration_days=180)
+    vehicle = Vehicle(
+        member_id=member.id,
+        year="2022",
+        make="Honda",
+        model="Civic",
+        plate="XYZ123",
+    )
+    db.session.add(vehicle)
+    db.session.flush()
+
+    appointment = Appointment(
+        member_id=member.id,
+        vehicle_id=vehicle.id,
+        appointment_date=today,
+        appointment_time=time(13, 15),
+        status="confirmed",
+        service_type="Full Synthetic Oil Change",
+    )
+    db.session.add(appointment)
+    db.session.commit()
+
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    captured = {}
+
+    def fake_send_smtp_email(recipient, subject, text_body, html_body=None):
+        captured["recipient"] = recipient
+        captured["subject"] = subject
+        captured["text_body"] = text_body
+        captured["html_body"] = html_body
+        return True
+
+    monkeypatch.setattr("app.send_smtp_email", fake_send_smtp_email)
+
+    summary = run_appointment_reminders(reference_datetime=datetime.combine(today, time(8, 20)))
+
+    assert summary["sent"] == 1
+    assert captured["recipient"] == member.email
+    assert appointment.appointment_date.strftime("%B %d, %Y") in captured["text_body"]
+    assert appointment.appointment_time.strftime("%I:%M %p") in captured["text_body"]
+    assert "Full Synthetic Oil Change" in captured["text_body"]
+    assert "2022 Honda Civic" in captured["text_body"]
+    assert f"/m/{member.token}" in captured["text_body"]
+    assert f"/m/{member.token}/appointments/new" in captured["text_body"]

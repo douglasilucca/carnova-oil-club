@@ -3,10 +3,11 @@ import json
 import os
 import re
 import secrets
-from datetime import date, datetime, timedelta, time
+from datetime import date, datetime, timedelta, time, timezone
 from functools import wraps
 from io import BytesIO, StringIO
 from urllib import error as urllib_error, parse, request as urllib_request
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.auth import jwt as google_jwt
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -698,6 +699,184 @@ Email: info@carnovaoil.com
         return send_smtp_email(member.email, subject, text_body, html_body)
 
 
+def resolve_appointment_reminder_timezone():
+    tz_name = os.environ.get("APPOINTMENT_REMINDER_TIMEZONE", "America/New_York").strip() or "America/New_York"
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        print(f"Invalid APPOINTMENT_REMINDER_TIMEZONE: {tz_name}. Falling back to UTC offset.")
+        return timezone.utc
+
+
+def resolve_appointment_reminder_morning_hour():
+    value = os.environ.get("APPOINTMENT_REMINDER_MORNING_HOUR", "8").strip()
+    try:
+        hour = int(value)
+    except (TypeError, ValueError):
+        hour = 8
+    if hour < 0 or hour > 23:
+        hour = 8
+    return hour
+
+
+def send_appointment_reminder_email(appointment):
+    if not appointment or not appointment.member:
+        return False
+
+    member = appointment.member
+    if not member.email:
+        return False
+
+    with app.test_request_context("/"):
+        portal_url = member_public_url(member)
+        schedule_url = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
+
+    vehicle_name = appointment.vehicle.display_name if appointment.vehicle else "Vehicle not selected"
+    appointment_date_text = appointment.appointment_date.strftime("%B %d, %Y")
+    appointment_time_text = appointment.appointment_time.strftime("%I:%M %p")
+    subject = "Appointment Reminder - Today"
+
+    text_body = f"""Hello {member.name},
+
+This is a reminder for your Carnova Oil Club appointment today.
+
+Date: {appointment_date_text}
+Time: {appointment_time_text}
+Service: {appointment.service_type}
+Vehicle: {vehicle_name}
+
+View your customer portal:
+{portal_url}
+
+Schedule or reschedule service:
+{schedule_url}
+"""
+
+    html_body = f"""<!DOCTYPE html>
+<html lang=\"en\">
+  <body style=\"font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;color:#101820;padding:20px;\">
+    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px;margin:auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;\">
+      <tr><td style=\"padding:24px;\">
+        <h1 style=\"margin:0 0 12px;font-size:24px;\">Appointment Reminder</h1>
+        <p style=\"margin:0 0 14px;\">Hello {member.name}, this is a reminder for your appointment today.</p>
+        <p style=\"margin:0 0 8px;\"><strong>Date:</strong> {appointment_date_text}</p>
+        <p style=\"margin:0 0 8px;\"><strong>Time:</strong> {appointment_time_text}</p>
+        <p style=\"margin:0 0 8px;\"><strong>Service:</strong> {appointment.service_type}</p>
+        <p style=\"margin:0 0 20px;\"><strong>Vehicle:</strong> {vehicle_name}</p>
+        <p style=\"margin:0 0 12px;\"><a href=\"{portal_url}\" style=\"display:inline-block;background:#087b78;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;\">Open Customer Portal</a></p>
+        <p style=\"margin:0;\"><a href=\"{schedule_url}\" style=\"display:inline-block;background:#0f172a;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;\">Schedule or Reschedule</a></p>
+      </td></tr>
+    </table>
+  </body>
+</html>"""
+
+    return send_smtp_email(member.email, subject, text_body, html_body)
+
+
+def run_appointment_reminders(reference_datetime=None):
+    reminder_tz = resolve_appointment_reminder_timezone()
+    morning_hour = resolve_appointment_reminder_morning_hour()
+
+    if reference_datetime is None:
+        now_local = datetime.now(reminder_tz)
+    elif reference_datetime.tzinfo is None:
+        now_local = reference_datetime.replace(tzinfo=reminder_tz)
+    else:
+        now_local = reference_datetime.astimezone(reminder_tz)
+
+    today = now_local.date()
+    morning_cutoff = datetime.combine(today, time(morning_hour, 0), tzinfo=reminder_tz)
+
+    summary = {
+        "sent": 0,
+        "skipped": 0,
+        "failed": 0,
+        "skip_reasons": {
+            "status_not_eligible": 0,
+            "before_morning_send_time": 0,
+            "missing_email": 0,
+            "duplicate_reminder": 0,
+        },
+        "sent_details": [],
+        "failed_details": [],
+    }
+
+    def mark_skip(reason):
+        summary["skipped"] += 1
+        summary["skip_reasons"][reason] += 1
+
+    appointments = Appointment.query.filter_by(appointment_date=today).all()
+
+    for appointment in appointments:
+        if appointment.status not in {"scheduled", "confirmed"}:
+            mark_skip("status_not_eligible")
+            continue
+
+        if now_local < morning_cutoff:
+            mark_skip("before_morning_send_time")
+            continue
+
+        member = appointment.member
+        if not member or not member.email:
+            mark_skip("missing_email")
+            continue
+
+        reminder_key = f"appointment:{appointment.id}:morning:{today.isoformat()}"
+        if reminder_already_sent(member.id, "appointment_morning", reminder_key):
+            mark_skip("duplicate_reminder")
+            continue
+
+        failure_message = None
+        try:
+            email_sent = send_appointment_reminder_email(appointment)
+        except Exception as error:
+            email_sent = False
+            failure_message = str(error)
+
+        if email_sent:
+            try:
+                remember_sent_reminder(member.id, "appointment_morning", reminder_key)
+            except Exception as error:
+                db.session.rollback()
+                summary["failed"] += 1
+                summary["failed_details"].append(
+                    {
+                        "member_name": member.name,
+                        "reminder_type": "appointment_morning",
+                        "email": member.email,
+                        "status": "failed",
+                        "error": f"Could not record reminder log: {error}",
+                    }
+                )
+                print("REMINDER FAILED", member.member_id)
+                continue
+
+            summary["sent"] += 1
+            summary["sent_details"].append(
+                {
+                    "member_name": member.name,
+                    "reminder_type": "appointment_morning",
+                    "email": member.email,
+                    "status": "sent",
+                }
+            )
+            print("APPOINTMENT REMINDER SENT", member.member_id)
+        else:
+            summary["failed"] += 1
+            summary["failed_details"].append(
+                {
+                    "member_name": member.name,
+                    "reminder_type": "appointment_morning",
+                    "email": member.email,
+                    "status": "failed",
+                    "error": failure_message or "Email send returned False",
+                }
+            )
+            print("REMINDER FAILED", member.member_id)
+
+    return summary
+
+
 def run_renewal_reminders(reference_date=None):
     today = reference_date or date.today()
     summary = {
@@ -905,18 +1084,20 @@ def run_unused_benefit_reminders(reference_date=None):
     return summary
 
 
-def run_all_reminders(reference_date=None):
+def run_all_reminders(reference_date=None, reference_datetime=None):
     refresh_member_statuses()
     renewal_summary = run_renewal_reminders(reference_date=reference_date)
     unused_summary = run_unused_benefit_reminders(reference_date=reference_date)
+    appointment_summary = run_appointment_reminders(reference_datetime=reference_datetime)
     return {
-        "sent": renewal_summary["sent"] + unused_summary["sent"],
-        "skipped": renewal_summary["skipped"] + unused_summary["skipped"],
-        "failed": renewal_summary["failed"] + unused_summary["failed"],
+        "sent": renewal_summary["sent"] + unused_summary["sent"] + appointment_summary["sent"],
+        "skipped": renewal_summary["skipped"] + unused_summary["skipped"] + appointment_summary["skipped"],
+        "failed": renewal_summary["failed"] + unused_summary["failed"] + appointment_summary["failed"],
         "renewal": renewal_summary,
         "unused_benefit": unused_summary,
-        "sent_details": renewal_summary["sent_details"] + unused_summary["sent_details"],
-        "failed_details": renewal_summary["failed_details"] + unused_summary["failed_details"],
+        "appointment_morning": appointment_summary,
+        "sent_details": renewal_summary["sent_details"] + unused_summary["sent_details"] + appointment_summary["sent_details"],
+        "failed_details": renewal_summary["failed_details"] + unused_summary["failed_details"] + appointment_summary["failed_details"],
     }
 
 
