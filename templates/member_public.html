@@ -24,6 +24,10 @@
     </div>
   </article>
 
+  <div class="actions" style="margin:0 0 1rem;">
+    <a class="button secondary" href="{{ url_for('public_member_google_wallet_add', token=member.token) }}">Add to Google Wallet</a>
+  </div>
+
   {% if not has_vehicle %}
   <section class="panel vehicle-gate">
     <p class="eyebrow">VEHICLE REGISTRATION REQUIRED</p>
