@@ -26,6 +26,12 @@
           <td><span class="badge skipped">{{ summary.unused_benefit.skipped }}</span></td>
           <td><span class="badge failed">{{ summary.unused_benefit.failed }}</span></td>
         </tr>
+        <tr>
+          <td>Appointment Morning</td>
+          <td><span class="badge sent">{{ summary.appointment_morning.sent }}</span></td>
+          <td><span class="badge skipped">{{ summary.appointment_morning.skipped }}</span></td>
+          <td><span class="badge failed">{{ summary.appointment_morning.failed }}</span></td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -81,6 +87,32 @@
           {% endfor %}
           {% if unused_nonzero.count == 0 %}
             <tr><td colspan="2" class="empty">No unused-benefit skips recorded.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2 class="subsection-heading">Appointment morning reminders</h2>
+    {% set appointment_reason_labels = {
+      'status_not_eligible': 'appointments not in scheduled/confirmed status',
+      'before_morning_send_time': 'before morning send time',
+      'missing_email': 'missing member email addresses',
+      'duplicate_reminder': 'duplicate reminders'
+    } %}
+    {% set appointment_nonzero = namespace(count=0) %}
+    <div class="table-wrap reminder-table-wrap">
+      <table class="reminder-table">
+        <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+        <tbody>
+          {% for reason_key, label in appointment_reason_labels.items() %}
+            {% set reason_count = summary.appointment_morning.skip_reasons.get(reason_key, 0) %}
+            {% if reason_count > 0 %}
+              {% set appointment_nonzero.count = appointment_nonzero.count + 1 %}
+              <tr><td>{{ label }}</td><td>{{ reason_count }}</td></tr>
+            {% endif %}
+          {% endfor %}
+          {% if appointment_nonzero.count == 0 %}
+            <tr><td colspan="2" class="empty">No appointment morning skips recorded.</td></tr>
           {% endif %}
         </tbody>
       </table>
