@@ -7,10 +7,7 @@ import run_reminders
 
 
 def test_run_reminders_main_runs_once_in_app_context_and_prints_summary(monkeypatch, capsys):
-    calls = {"init": 0, "run": 0, "reference_datetime": None}
-
-    def fake_init_db():
-        calls["init"] += 1
+    calls = {"run": 0, "reference_datetime": None}
 
     def fake_run_all_reminders(reference_date=None, reference_datetime=None):
         assert has_app_context()
@@ -26,13 +23,12 @@ def test_run_reminders_main_runs_once_in_app_context_and_prints_summary(monkeypa
             "appointment_morning": {"sent": 1, "skipped": 2, "failed": 0},
         }
 
-    monkeypatch.setattr(run_reminders, "init_db", fake_init_db)
+    monkeypatch.setattr(run_reminders, "_missing_required_tables", lambda: [])
     monkeypatch.setattr(run_reminders, "run_all_reminders", fake_run_all_reminders)
 
     code = run_reminders.main()
 
     assert code == 0
-    assert calls["init"] == 1
     assert calls["run"] == 1
     assert isinstance(calls["reference_datetime"], datetime)
     assert calls["reference_datetime"].tzinfo == timezone.utc
@@ -46,11 +42,9 @@ def test_run_reminders_main_runs_once_in_app_context_and_prints_summary(monkeypa
     assert payload["appointment_morning"]["sent"] == 1
 
 
-def test_run_reminders_main_returns_nonzero_for_unrecoverable_failure(monkeypatch, capsys):
-    def fake_init_db():
-        raise RuntimeError("db unavailable")
-
-    monkeypatch.setattr(run_reminders, "init_db", fake_init_db)
+def test_run_reminders_main_returns_nonzero_when_schema_missing(monkeypatch, capsys):
+    monkeypatch.setattr(run_reminders, "_missing_required_tables", lambda: ["member", "appointment"])
+    monkeypatch.setattr(run_reminders, "run_all_reminders", lambda **_: {"sent": 0, "skipped": 0, "failed": 0})
 
     code = run_reminders.main()
 
@@ -58,4 +52,6 @@ def test_run_reminders_main_returns_nonzero_for_unrecoverable_failure(monkeypatc
     captured = capsys.readouterr()
     payload = json.loads(captured.out.strip())
     assert payload["status"] == "error"
-    assert "db unavailable" in payload["message"]
+    assert "Database schema is not initialized for reminders" in payload["message"]
+    assert "member" in payload["message"]
+    assert "appointment" in payload["message"]

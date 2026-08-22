@@ -1,13 +1,31 @@
 import json
 from datetime import datetime, timezone
 
-from app import app, init_db, run_all_reminders
+from sqlalchemy import inspect
+
+from app import app, db, run_all_reminders
+
+
+REQUIRED_TABLES = ("member", "appointment", "reminder_log")
+
+
+def _missing_required_tables():
+    existing_tables = set(inspect(db.engine).get_table_names())
+    return [table_name for table_name in REQUIRED_TABLES if table_name not in existing_tables]
 
 
 def main():
     try:
         with app.app_context():
-            init_db()
+            missing_tables = _missing_required_tables()
+            if missing_tables:
+                missing = ", ".join(missing_tables)
+                raise RuntimeError(
+                    "Database schema is not initialized for reminders; "
+                    f"missing tables: {missing}. "
+                    "Cron runner will not initialize database state."
+                )
+
             summary = run_all_reminders(reference_datetime=datetime.now(timezone.utc))
 
         output = {
