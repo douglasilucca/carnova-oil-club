@@ -16,6 +16,8 @@ from app import (
     current_member_status,
     db,
     monthly_membership_defaults,
+    google_wallet_api_call,
+    google_wallet_upsert_member_object,
     run_all_reminders,
     run_renewal_reminders,
     run_unused_benefit_reminders,
@@ -224,12 +226,240 @@ def test_public_member_card_works_and_uses_safe_fields(client):
     assert b"Toyota Camry" in response.data
     assert b"Monthly Membership" in response.data
     assert b"Service History" in response.data
+    assert b"Add to Google Wallet" in response.data
 
 
 def test_invalid_public_member_token_returns_404(client):
     response = client.get("/m/does-not-exist")
 
     assert response.status_code == 404
+
+
+def test_public_google_wallet_add_redirects_to_save_url(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Wallet Member",
+            email="wallet@example.com",
+            member_id="COC-00910",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="wallet-member-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    monkeypatch.setattr("app.sync_member_google_wallet_save_url", lambda _member: "https://pay.google.com/gp/v/save/test-token")
+
+    response = client.post("/m/wallet-member-token/wallet/add", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "https://pay.google.com/gp/v/save/test-token"
+
+
+def test_public_google_wallet_add_failure_redirects_back_to_member_card(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Wallet Member Fallback",
+            email="wallet-fallback@example.com",
+            member_id="COC-00911",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="wallet-member-fallback-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    monkeypatch.setattr("app.sync_member_google_wallet_save_url", lambda _member: None)
+
+    response = client.post("/m/wallet-member-fallback-token/wallet/add", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"Google Wallet is unavailable right now" in response.data
+    assert b"Wallet Member Fallback" in response.data
+
+
+def test_public_google_wallet_add_rejects_unsafe_external_redirect(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Wallet Member Unsafe Redirect",
+            email="wallet-unsafe@example.com",
+            member_id="COC-00914",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="wallet-member-unsafe-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    monkeypatch.setattr("app.sync_member_google_wallet_save_url", lambda _member: "https://evil.example/save/token")
+
+    response = client.post("/m/wallet-member-unsafe-token/wallet/add", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"Google Wallet is unavailable right now" in response.data
+    assert b"Wallet Member Unsafe Redirect" in response.data
+
+
+def test_public_google_wallet_add_get_does_not_trigger_wallet_sync(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Wallet Member Read Only",
+            email="wallet-read-only@example.com",
+            member_id="COC-00913",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="wallet-member-read-only-token",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    called = {"value": False}
+
+    def fake_save_url(_member):
+        called["value"] = True
+        return "https://pay.google.com/gp/v/save/test-token"
+
+    monkeypatch.setattr("app.sync_member_google_wallet_save_url", fake_save_url)
+
+    response = client.get("/m/wallet-member-read-only-token/wallet/add", follow_redirects=False)
+
+    assert response.status_code == 405
+    assert called["value"] is False
+
+
+def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Token Reuse Member",
+            email="token-reuse@example.com",
+            member_id="COC-00912",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="token-reuse-member",
+            plan_name="Monthly Membership",
+            subscription_status="active",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    token_fetches = {"count": 0}
+    api_access_tokens = []
+
+    def fake_access_token():
+        token_fetches["count"] += 1
+        return "cached-wallet-token"
+
+    def fake_api_call(method, endpoint, payload=None, access_token=None):
+        api_access_tokens.append(access_token)
+        if method == "PATCH":
+            return 404, {}
+        return 201, {}
+
+    monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
+    monkeypatch.setattr("app.google_wallet_api_call", fake_api_call)
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member.query.get(member_id)
+        assert google_wallet_upsert_member_object(member) is True
+    assert token_fetches["count"] == 1
+    assert api_access_tokens == ["cached-wallet-token", "cached-wallet-token"]
+
+
+def test_google_wallet_api_call_uses_provided_token_without_fetch(client, monkeypatch):
+    token_fetches = {"count": 0}
+    seen = {"authorization": ""}
+
+    class FakeResponse:
+        def __init__(self, request_obj):
+            self.request_obj = request_obj
+            self.status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_access_token():
+        token_fetches["count"] += 1
+        return "should-not-be-used"
+
+    def fake_urlopen(request_obj, timeout=10):
+        seen["authorization"] = request_obj.headers.get("Authorization", "")
+        return FakeResponse(request_obj)
+
+    monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
+    monkeypatch.setattr("app.urllib_request.urlopen", fake_urlopen)
+
+    status, payload = google_wallet_api_call(
+        "PATCH",
+        "https://walletobjects.googleapis.com/walletobjects/v1/genericObject/test",
+        payload={"id": "test"},
+        access_token="provided-token",
+    )
+
+    assert status == 200
+    assert payload == {}
+    assert seen["authorization"] == "Bearer provided-token"
+    assert token_fetches["count"] == 0
+
+
+def test_google_wallet_api_call_fetches_oauth_bearer_token_when_not_provided(client, monkeypatch):
+    token_fetches = {"count": 0}
+    seen = {"authorization": ""}
+
+    class FakeResponse:
+        def __init__(self, request_obj):
+            self.request_obj = request_obj
+            self.status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_access_token():
+        token_fetches["count"] += 1
+        return "oauth-access-token"
+
+    def fake_urlopen(request_obj, timeout=10):
+        seen["authorization"] = request_obj.headers.get("Authorization", "")
+        return FakeResponse(request_obj)
+
+    monkeypatch.setattr("app.google_wallet_access_token", fake_access_token)
+    monkeypatch.setattr("app.urllib_request.urlopen", fake_urlopen)
+
+    status, payload = google_wallet_api_call(
+        "PATCH",
+        "https://walletobjects.googleapis.com/walletobjects/v1/genericObject/test",
+        payload={"id": "test"},
+    )
+
+    assert status == 200
+    assert payload == {}
+    assert seen["authorization"] == "Bearer oauth-access-token"
+    assert token_fetches["count"] == 1
 
 
 def test_webhook_created_monthly_member_blocks_second_vehicle_and_hides_add_button(client, monkeypatch):
@@ -588,6 +818,196 @@ def test_bronze_silver_gold_plans_do_not_create_portal_sessions(client, monkeypa
     assert response.status_code == 200
     assert create_called["value"] is False
     assert b"monthly membership" in response.data.lower()
+
+
+def test_redeem_calls_wallet_sync_after_commit(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Redeem Wallet",
+            email="redeem-wallet@example.com",
+            member_id="COC-02001",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=2,
+            total_changes=2,
+            token="redeem-wallet-token",
+            plan_name="Bronze",
+            subscription_status=None,
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    called = {"count": 0}
+
+    def fake_sync(_member):
+        called["count"] += 1
+        return True
+
+    monkeypatch.setattr("app.sync_member_google_wallet_object", fake_sync)
+
+    response = client.post(
+        f"/members/{member_id}/redeem",
+        data={"vehicle": "2020 Toyota Camry", "mileage": "50210", "vin_last8": "ABCD1234"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Oil change redeemed successfully." in response.data
+    assert called["count"] == 1
+
+
+def test_undo_calls_wallet_sync_after_commit(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Undo Wallet",
+            email="undo-wallet@example.com",
+            member_id="COC-02002",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=0,
+            total_changes=1,
+            token="undo-wallet-token",
+            plan_name="Bronze",
+            subscription_status=None,
+        )
+        db.session.add(member)
+        db.session.flush()
+        db.session.add(Redemption(member_id=member.id, vehicle="Test Vehicle", mileage="12345"))
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    called = {"count": 0}
+
+    def fake_sync(_member):
+        called["count"] += 1
+        return True
+
+    monkeypatch.setattr("app.sync_member_google_wallet_object", fake_sync)
+
+    response = client.post(f"/members/{member_id}/undo", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"Last redemption was undone." in response.data
+    assert called["count"] == 1
+
+
+def test_edit_member_calls_wallet_sync_after_commit(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Edit Wallet",
+            email="edit-wallet@example.com",
+            member_id="COC-02003",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="edit-wallet-token",
+            plan_name="Bronze",
+            subscription_status=None,
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.member_id
+
+    client.post(
+        "/login",
+        data={"email": "admin@carnovaoil.com", "password": "ChangeMe123!"},
+        follow_redirects=True,
+    )
+
+    called = {"count": 0}
+
+    def fake_sync(_member):
+        called["count"] += 1
+        return True
+
+    monkeypatch.setattr("app.sync_member_google_wallet_object", fake_sync)
+
+    response = client.post(
+        f"/members/{member_id}/edit",
+        data={
+            "name": "Edit Wallet Updated",
+            "email": "edit-wallet@example.com",
+            "phone": "555-111-2222",
+            "expiration_date": (date.today() + timedelta(days=300)).isoformat(),
+            "total_changes": "4",
+            "remaining_changes": "2",
+            "status": "active",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Member information updated." in response.data
+    assert called["count"] == 1
+
+
+def test_invoice_paid_benefit_reset_calls_wallet_sync_after_commit(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Benefit Reset Wallet",
+            email="benefit-reset-wallet@example.com",
+            member_id="COC-02004",
+            expiration_date=date.today() - timedelta(days=1),
+            remaining_changes=0,
+            total_changes=3,
+            token="benefit-reset-wallet-token",
+            plan_name="Monthly Membership",
+            subscription_status="past_due",
+            stripe_subscription_id="sub_benefit_reset",
+            stripe_customer_id="cus_benefit_reset",
+            benefit_period_start=date.today() - timedelta(days=366),
+            benefit_period_end=date.today() - timedelta(days=1),
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    called = {"count": 0}
+
+    def fake_wallet_sync(updated_member):
+        if updated_member.member_id == "COC-02004":
+            called["count"] += 1
+        return True
+
+    monkeypatch.setattr("app.sync_member_google_wallet_object", fake_wallet_sync)
+
+    now_ts = int(datetime.utcnow().timestamp())
+
+    def fake_construct_event(payload, signature, secret):
+        return {
+            "id": "evt_benefit_reset_wallet",
+            "type": "invoice.paid",
+            "data": {
+                "object": {
+                    "id": "in_benefit_reset_wallet",
+                    "subscription": "sub_benefit_reset",
+                    "customer": "cus_benefit_reset",
+                    "customer_details": {"email": "benefit-reset-wallet@example.com"},
+                    "status_transitions": {"paid_at": now_ts},
+                }
+            },
+        }
+
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", fake_construct_event)
+
+    response = client.post(
+        "/stripe/webhook",
+        data=json.dumps({"test": True}),
+        headers={"Stripe-Signature": "test-signature"},
+    )
+
+    assert response.status_code == 200
+    assert called["count"] == 1
 
 
 def test_current_member_status_blocks_past_due_and_cancelled_members():

@@ -6,8 +6,11 @@ import secrets
 from datetime import date, datetime, timedelta, time
 from functools import wraps
 from io import BytesIO, StringIO
-from urllib import parse, request as urllib_request
+from urllib import error as urllib_error, parse, request as urllib_request
 
+from google.auth import jwt as google_jwt
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account
 import qrcode
 import stripe
 from flask import Flask, Response, flash, has_request_context, redirect, render_template, request, send_file, session, url_for
@@ -1186,6 +1189,20 @@ def public_member_billing_portal(token):
     return redirect(url_for("member_public", token=member.token))
 
 
+@app.route("/m/<token>/wallet/add", methods=["POST"])
+def public_member_google_wallet_add(token):
+    member = Member.query.filter_by(token=token).first_or_404()
+    save_url = sync_member_google_wallet_save_url(member)
+    if google_wallet_save_url_is_safe(save_url):
+        return redirect(save_url)
+
+    if save_url:
+        print(f"Google Wallet save URL validation failed for {member.member_id}")
+
+    flash("Google Wallet is unavailable right now. Please try again later.", "error")
+    return redirect(url_for("member_public", token=member.token))
+
+
 @app.route("/members/<member_id>")
 @login_required
 def member_detail(member_id):
@@ -1216,6 +1233,15 @@ def edit_member(member_id):
 
     if request.method == "POST":
         try:
+            old_wallet_values = {
+                "name": member.name,
+                "plan_name": member.plan_name,
+                "status": member.status,
+                "expiration_date": member.expiration_date,
+                "total_changes": member.total_changes,
+                "remaining_changes": member.remaining_changes,
+            }
+
             member.name = request.form["name"].strip()
             member.email = request.form["email"].strip().lower()
             member.phone = request.form.get("phone", "").strip()
@@ -1239,6 +1265,17 @@ def edit_member(member_id):
                 ),
             )
             db.session.commit()
+
+            new_wallet_values = {
+                "name": member.name,
+                "plan_name": member.plan_name,
+                "status": member.status,
+                "expiration_date": member.expiration_date,
+                "total_changes": member.total_changes,
+                "remaining_changes": member.remaining_changes,
+            }
+            if old_wallet_values != new_wallet_values:
+                sync_member_google_wallet_object(member)
         except (ValueError, TypeError):
             db.session.rollback()
             flash("Please verify the information entered.", "error")
@@ -1294,6 +1331,7 @@ def redeem(member_id):
             )
         )
         db.session.commit()
+        sync_member_google_wallet_object(member)
         flash("Oil change redeemed successfully.", "success")
 
     return redirect(url_for("member_detail", member_id=member.member_id))
@@ -1316,6 +1354,7 @@ def undo(member_id):
         )
         member.status = current_member_status(member)
         db.session.commit()
+        sync_member_google_wallet_object(member)
         flash("Last redemption was undone.", "success")
     else:
         flash("No redemption to undo.", "error")
@@ -1936,6 +1975,219 @@ Phone: (978) 258-0029
 def member_public_url(member):
     return f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}"
 
+
+GOOGLE_WALLET_SCOPE = "https://www.googleapis.com/auth/wallet_object.issuer"
+
+
+def google_wallet_is_configured():
+    required_env = [
+        "GOOGLE_WALLET_ISSUER_ID",
+        "GOOGLE_WALLET_CLASS_ID",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ]
+    for env_name in required_env:
+        if not os.environ.get(env_name, "").strip():
+            return False
+    return True
+
+
+def google_wallet_class_id():
+    issuer_id = os.environ.get("GOOGLE_WALLET_ISSUER_ID", "").strip()
+    class_id = os.environ.get("GOOGLE_WALLET_CLASS_ID", "").strip()
+    if not class_id:
+        return ""
+    if "." in class_id:
+        return class_id
+    if not issuer_id:
+        return ""
+    return f"{issuer_id}.{class_id}"
+
+
+def google_wallet_object_id(member):
+    issuer_id = os.environ.get("GOOGLE_WALLET_ISSUER_ID", "").strip()
+    safe_member_id = re.sub(r"[^a-zA-Z0-9._-]", "_", (member.member_id or "").lower())
+    return f"{issuer_id}.carnova_{safe_member_id}"
+
+
+def google_wallet_member_state(member):
+    status_value = current_member_status(member)
+    if status_value == "active":
+        return "ACTIVE"
+    if status_value == "expired":
+        return "EXPIRED"
+    return "INACTIVE"
+
+
+def google_wallet_member_object_payload(member):
+    expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
+    return {
+        "id": google_wallet_object_id(member),
+        "classId": google_wallet_class_id(),
+        "state": google_wallet_member_state(member),
+        "cardTitle": {"defaultValue": {"language": "en-US", "value": member.name}},
+        "header": {"defaultValue": {"language": "en-US", "value": member.plan_name or "Prepaid Package"}},
+        "subheader": {"defaultValue": {"language": "en-US", "value": f"Member {member.member_id}"}},
+        "textModulesData": [
+            {
+                "id": "remaining_changes",
+                "header": "Remaining Oil Changes",
+                "body": str(member.remaining_changes),
+            },
+            {
+                "id": "total_changes",
+                "header": "Package Total Oil Changes",
+                "body": str(member.total_changes),
+            },
+            {
+                "id": "membership_status",
+                "header": "Membership Status",
+                "body": current_member_status(member).title(),
+            },
+            {
+                "id": "expiration_date",
+                "header": "Expiration Date",
+                "body": member.expiration_date.strftime("%B %d, %Y"),
+            },
+        ],
+        "barcode": {
+            "type": "QR_CODE",
+            "value": member_public_url(member),
+            "alternateText": member.member_id,
+        },
+        "validTimeInterval": {
+            "end": {
+                "date": expiration_end,
+            }
+        },
+    }
+
+
+def google_wallet_access_token():
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    credentials = service_account.Credentials.from_service_account_file(
+        credentials_path,
+        scopes=[GOOGLE_WALLET_SCOPE],
+    )
+    credentials.refresh(GoogleAuthRequest())
+    return credentials.token
+
+
+def google_wallet_service_account_email():
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    credentials = service_account.Credentials.from_service_account_file(credentials_path)
+    return credentials.service_account_email
+
+
+def google_wallet_api_call(method, endpoint, payload=None, access_token=None):
+    body = None
+    token_value = access_token or google_wallet_access_token()
+    headers = {
+        "Authorization": f"Bearer {token_value}",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib_request.Request(endpoint, data=body, headers=headers, method=method)
+    try:
+        with urllib_request.urlopen(req, timeout=10) as response:
+            raw = response.read().decode("utf-8") if response else ""
+            parsed = json.loads(raw) if raw else {}
+            return response.status, parsed
+    except urllib_error.HTTPError as error:
+        raw_error = error.read().decode("utf-8") if hasattr(error, "read") else ""
+        try:
+            parsed_error = json.loads(raw_error) if raw_error else {}
+        except Exception:
+            parsed_error = {"error": raw_error}
+        return error.code, parsed_error
+
+
+def google_wallet_upsert_member_object(member, access_token=None):
+    object_id = parse.quote(google_wallet_object_id(member), safe="")
+    payload = google_wallet_member_object_payload(member)
+    base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
+    object_url = f"{base_url}/genericObject/{object_id}"
+    token_value = access_token or google_wallet_access_token()
+
+    patch_status, _ = google_wallet_api_call("PATCH", object_url, payload, access_token=token_value)
+    if patch_status in {200, 201}:
+        return True
+
+    if patch_status != 404:
+        print(f"Google Wallet update failed for {member.member_id}: status={patch_status}")
+        return False
+
+    create_status, _ = google_wallet_api_call("POST", f"{base_url}/genericObject", payload, access_token=token_value)
+    if create_status in {200, 201, 409}:
+        return True
+
+    print(f"Google Wallet create failed for {member.member_id}: status={create_status}")
+    return False
+
+
+def google_wallet_save_url(member):
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    signer = service_account.Credentials.from_service_account_file(credentials_path).signer
+    issuer_email = google_wallet_service_account_email()
+    origins = [resolve_public_base_url()] if resolve_public_base_url() else []
+
+    payload = {
+        "iss": issuer_email,
+        "aud": "google",
+        "typ": "savetowallet",
+        "payload": {
+            "genericObjects": [
+                {
+                    "id": google_wallet_object_id(member),
+                }
+            ]
+        },
+    }
+    if origins:
+        payload["origins"] = origins
+
+    token = google_jwt.encode(signer, payload)
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+    return f"https://pay.google.com/gp/v/save/{token}"
+
+
+def google_wallet_save_url_is_safe(url):
+    if not url or not isinstance(url, str):
+        return False
+
+    parsed = parse.urlsplit(url)
+    if parsed.scheme != "https":
+        return False
+    if parsed.netloc.lower() != "pay.google.com":
+        return False
+    if not parsed.path.startswith("/gp/v/save/"):
+        return False
+    return True
+
+
+def sync_member_google_wallet_object(member):
+    if not google_wallet_is_configured() or not member:
+        return False
+    try:
+        return google_wallet_upsert_member_object(member)
+    except Exception as error:
+        print(f"Google Wallet sync error for {member.member_id}: {error}")
+        return False
+
+
+def sync_member_google_wallet_save_url(member):
+    if not google_wallet_is_configured() or not member:
+        return None
+    try:
+        if not google_wallet_upsert_member_object(member):
+            return None
+        return google_wallet_save_url(member)
+    except Exception as error:
+        print(f"Google Wallet save URL error for {member.member_id}: {error}")
+        return None
+
 MONTHLY_PRICE_ID = "price_1TxtO7R1GwRFNmYeGo3km5vf"
 MONTHLY_PRICE_ID_ALT = "price_1Txt07R1GwRFNmYeGo3km5vf"
 MONTHLY_PRICE_IDS = {MONTHLY_PRICE_ID, MONTHLY_PRICE_ID_ALT}
@@ -2291,14 +2543,15 @@ def process_invoice_payment_succeeded(obj):
     )
     if not member:
         print("No member found for successful invoice:", obj.get("id"))
-        return
+        return None, False
 
     sync_subscription_details(member, subscription_id=subscription_id, customer_id=customer_id, status="active")
     paid_timestamp = obj.get("status_transitions", {}).get("paid_at") or obj.get("created")
     paid_on = datetime.utcfromtimestamp(paid_timestamp).date() if paid_timestamp else date.today()
-    advance_annual_benefit_period(member, paid_on)
+    benefits_reset = advance_annual_benefit_period(member, paid_on)
     member.status = current_member_status(member)
     log_stripe_event("invoice.paid", member, subscription_id, member.subscription_status)
+    return member, benefits_reset
 
 
 def process_invoice_payment_failed(obj):
@@ -2378,6 +2631,7 @@ def stripe_webhook():
     event_type = event.get("type")
     obj = event["data"]["object"]
     member = None
+    wallet_sync_member = None
     ga4_checkout_session = None
 
     try:
@@ -2385,7 +2639,9 @@ def stripe_webhook():
             member, _was_created = process_checkout_completed(obj)
             ga4_checkout_session = obj
         elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
-            process_invoice_payment_succeeded(obj)
+            invoice_member, benefits_reset = process_invoice_payment_succeeded(obj)
+            if benefits_reset:
+                wallet_sync_member = invoice_member
         elif event_type == "invoice.payment_failed":
             process_invoice_payment_failed(obj)
         elif event_type == "customer.subscription.created":
@@ -2410,6 +2666,9 @@ def stripe_webhook():
 
     if ga4_checkout_session:
         send_ga4_purchase_event(ga4_checkout_session)
+
+    if wallet_sync_member:
+        sync_member_google_wallet_object(wallet_sync_member)
 
     if member:
         print("MEMBERSHIP EMAIL TRIGGERED")
