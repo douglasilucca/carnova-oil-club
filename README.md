@@ -35,3 +35,11 @@
 
 The appointment system works without email configuration.
 Auto deploy test 2026
+
+## Google Wallet pass design
+
+The Generic Pass uses the existing Carnova logo, a dark graphite background, premium membership labels, a QR code, and an object-level `Schedule Oil Change` link. The pass also publishes the member's remaining changes and earliest upcoming appointment; booking, cancellation, and staff status changes sync the saved object.
+
+Google Wallet controls the Android card shell, typography, spacing, truncation, and final layout. Carnova controls the supported pass data: logo, background color, text modules, barcode value, links, app link, validity, and class row template. Generic Pass does not provide a reliable per-field text-color control, so the digital membership card's aqua balance accent cannot be guaranteed on Android and pixel-perfect parity is not claimed.
+
+The implementation follows the [GenericObject REST reference](https://developers.google.com/wallet/reference/rest/v1/genericobject) and [GenericClass REST reference](https://developers.google.com/wallet/reference/rest/v1/genericclass).

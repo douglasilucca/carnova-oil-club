@@ -19,6 +19,7 @@ from app import (
     monthly_membership_defaults,
     google_wallet_api_call,
     google_wallet_member_object_payload,
+    google_wallet_next_service_text,
     google_wallet_object_id,
     google_wallet_upsert_member_object,
     run_all_reminders,
@@ -344,6 +345,78 @@ def test_public_google_wallet_add_get_does_not_trigger_wallet_sync(client, monke
     assert called["value"] is False
 
 
+def test_wallet_origin_vehicle_flow_returns_to_scheduling_with_new_vehicle(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Multi Vehicle Member",
+            email="multi-vehicle@example.com",
+            member_id="COC-00922",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=5,
+            token="multi-vehicle-token",
+            plan_name="Prepaid Package",
+        )
+        first_vehicle = Vehicle(
+            member=member,
+            year="2022",
+            make="Toyota",
+            model="Camry",
+            color="Black",
+            plate="CARNOVA1",
+            vin="1HGBH41JXMN109186",
+            current_mileage="40210",
+        )
+        db.session.add_all([member, first_vehicle])
+        db.session.commit()
+
+    appointment_url = "/m/multi-vehicle-token/appointments/new"
+    appointment_date = date.today() + timedelta(days=1)
+    page_response = client.get(appointment_url)
+
+    assert page_response.status_code == 200
+    assert b"Toyota Camry" in page_response.data
+    assert b"+ Add Vehicle" in page_response.data
+    assert f"{appointment_url}?appointment_date={appointment_date.isoformat()}".encode() not in page_response.data
+
+    register_response = client.get(
+        "/m/multi-vehicle-token/vehicle/register",
+        query_string={
+            "return_to": appointment_url,
+        },
+    )
+    assert register_response.status_code == 200
+    assert b"Back to Scheduling" in register_response.data
+
+    save_response = client.post(
+        "/m/multi-vehicle-token/vehicle/register",
+        data={
+            "return_to": f"{appointment_url}?appointment_date={appointment_date.isoformat()}",
+            "year": "2020",
+            "make": "Honda",
+            "model": "Civic",
+            "color": "Blue",
+            "plate": "CARNOVA2",
+            "vin_last8": "2HGBH41J",
+            "current_mileage": "30100",
+        },
+        follow_redirects=False,
+    )
+
+    assert save_response.status_code == 302
+    assert save_response.headers["Location"] == f"{appointment_url}?appointment_date={appointment_date.isoformat()}"
+
+    scheduling_response = client.get(save_response.headers["Location"])
+    assert scheduling_response.status_code == 200
+    assert b"Toyota Camry" in scheduling_response.data
+    assert b"Honda Civic" in scheduling_response.data
+    assert b'name="vehicle_id"' in scheduling_response.data
+
+    with flask_app.app_context():
+        member = Member.query.filter_by(token="multi-vehicle-token").first()
+        assert Vehicle.query.filter_by(member_id=member.id).count() == 2
+
+
 def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, monkeypatch):
     with flask_app.app_context():
         member = Member(
@@ -409,6 +482,10 @@ def test_google_wallet_class_payload_card_template_override_uses_remaining_chang
     template = payload["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"][0]
     field_path = template["oneItem"]["item"]["firstValue"]["fields"][0]["fieldPath"]
     assert field_path == 'object.textModulesData["remaining_changes"]'
+    next_service_template = payload["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"][1]
+    assert next_service_template["twoItems"]["startItem"]["firstValue"]["fields"][0]["fieldPath"] == (
+        'object.textModulesData["next_service"]'
+    )
 
 
 def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client, monkeypatch):
@@ -431,8 +508,14 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
         payload = google_wallet_member_object_payload(member)
 
     assert payload["id"] == "issuer123.carnova_coc-00915"
+    assert payload["genericType"] == "GENERIC_OTHER"
+    assert payload["hexBackgroundColor"] == "#101820"
+    assert payload["cardTitle"]["defaultValue"]["value"] == "Carnova Oil Club"
+    assert payload["header"]["defaultValue"]["value"] == "Oil Club Premium"
+    assert payload["subheader"]["defaultValue"]["value"] == "Wallet Payload Member"
     assert payload["textModulesData"][0]["id"] == "remaining_changes"
     assert payload["textModulesData"][0]["body"] == "3 OIL CHANGES REMAINING"
+    assert payload["textModulesData"][1]["body"] == "NOT SCHEDULED"
 
     assert payload["logo"]["sourceUri"]["uri"] == "https://cards.carnova.test/static/carnova-logo.png"
     assert len(payload["linksModuleData"]["uris"]) == 1
@@ -444,6 +527,40 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
         "https://cards.carnova.test/m/wallet-payload-token/appointments/new"
     )
     assert payload["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["description"] == "Schedule Oil Change"
+
+
+def test_google_wallet_next_service_text_uses_earliest_active_appointment(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Next Service Member",
+            email="next-service@example.com",
+            member_id="COC-00921",
+            expiration_date=date.today() + timedelta(days=365),
+            token="next-service-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+        db.session.add(
+            Appointment(
+                member_id=member.id,
+                appointment_date=date.today() + timedelta(days=5),
+                appointment_time=time(10, 30),
+                status="scheduled",
+            )
+        )
+        db.session.add(
+            Appointment(
+                member_id=member.id,
+                appointment_date=date.today() + timedelta(days=2),
+                appointment_time=time(9, 0),
+                status="cancelled",
+            )
+        )
+        db.session.commit()
+
+        assert google_wallet_next_service_text(member) == (
+            f"{(date.today() + timedelta(days=5)).strftime('%b %d').replace(' 0', ' ')} | 10:30 AM"
+        )
 
 
 @pytest.mark.parametrize(

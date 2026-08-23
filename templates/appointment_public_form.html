@@ -9,6 +9,26 @@
     <p>Choose an available date and time for {{ member.name }}.</p>
   </div>
 
+  <section class="panel booking-vehicles">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">YOUR VEHICLES</p>
+        <h2>Select a vehicle for service</h2>
+      </div>
+      {% if not is_monthly_membership(member) or vehicles|length < 1 %}
+      <a class="button secondary" href="{{ url_for('public_register_vehicle', token=member.token, return_to=url_for('public_new_appointment', token=member.token, appointment_date=selected_date.isoformat() if selected_date else none)) }}">+ Add Vehicle</a>
+      {% endif %}
+    </div>
+    <div class="public-history-list">
+      {% for vehicle in vehicles %}
+      <div class="public-history">
+        <strong>{{ vehicle.display_name }}</strong>
+        <span>{{ vehicle.color or 'Color not entered' }}{% if vehicle.plate %} · Plate {{ vehicle.plate }}{% endif %}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
   <section class="panel">
     <form method="get" class="booking-date-form">
       <label>Select a date
@@ -38,7 +58,7 @@
 
       <label>Vehicle
         <select name="vehicle_id">
-          <option value="">Select a vehicle</option>
+          <option value="" disabled selected>Select a vehicle</option>
           {% for vehicle in vehicles %}
           <option value="{{ vehicle.id }}">{{ vehicle.display_name }}{% if vehicle.plate %} · {{ vehicle.plate }}{% endif %}</option>
           {% endfor %}
