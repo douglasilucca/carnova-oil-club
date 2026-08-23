@@ -19,6 +19,7 @@ from app import (
     monthly_membership_defaults,
     google_wallet_api_call,
     google_wallet_member_object_payload,
+    google_wallet_next_service_text,
     google_wallet_object_id,
     google_wallet_upsert_member_object,
     run_all_reminders,
@@ -344,6 +345,263 @@ def test_public_google_wallet_add_get_does_not_trigger_wallet_sync(client, monke
     assert called["value"] is False
 
 
+def test_wallet_origin_vehicle_flow_returns_to_scheduling_with_new_vehicle(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Multi Vehicle Member",
+            email="multi-vehicle@example.com",
+            member_id="COC-00922",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=5,
+            token="multi-vehicle-token",
+            plan_name="Prepaid Package",
+        )
+        first_vehicle = Vehicle(
+            member=member,
+            year="2022",
+            make="Toyota",
+            model="Camry",
+            color="Black",
+            plate="CARNOVA1",
+            vin="1HGBH41JXMN109186",
+            current_mileage="40210",
+        )
+        db.session.add_all([member, first_vehicle])
+        db.session.commit()
+
+    appointment_url = "/m/multi-vehicle-token/appointments/new"
+    appointment_date = date.today() + timedelta(days=1)
+    page_response = client.get(appointment_url)
+
+    assert page_response.status_code == 200
+    assert b"Toyota Camry" in page_response.data
+    assert b"+ Add Vehicle" in page_response.data
+    assert f"{appointment_url}?appointment_date={appointment_date.isoformat()}".encode() not in page_response.data
+
+    register_response = client.get(
+        "/m/multi-vehicle-token/vehicle/register",
+        query_string={
+            "return_to": appointment_url,
+        },
+    )
+    assert register_response.status_code == 200
+    assert b"Back to Scheduling" in register_response.data
+
+    save_response = client.post(
+        "/m/multi-vehicle-token/vehicle/register",
+        data={
+            "return_to": f"{appointment_url}?appointment_date={appointment_date.isoformat()}",
+            "year": "2020",
+            "make": "Honda",
+            "model": "Civic",
+            "color": "Blue",
+            "plate": "CARNOVA2",
+            "vin_last8": "2HGBH41J",
+            "current_mileage": "30100",
+        },
+        follow_redirects=False,
+    )
+
+    assert save_response.status_code == 302
+    assert save_response.headers["Location"] == f"{appointment_url}?appointment_date={appointment_date.isoformat()}"
+
+    scheduling_response = client.get(save_response.headers["Location"])
+    assert scheduling_response.status_code == 200
+    assert b"Toyota Camry" in scheduling_response.data
+    assert b"Honda Civic" in scheduling_response.data
+    assert b'name="vehicle_id"' in scheduling_response.data
+
+    with flask_app.app_context():
+        member = Member.query.filter_by(token="multi-vehicle-token").first()
+        assert Vehicle.query.filter_by(member_id=member.id).count() == 2
+
+
+def test_wallet_next_service_ignores_past_and_ineligible_appointments(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Appointment Filter Member",
+            email="appointment-filter@example.com",
+            member_id="COC-00923",
+            expiration_date=date.today() + timedelta(days=365),
+            token="appointment-filter-token",
+        )
+        db.session.add(member)
+        db.session.flush()
+        db.session.add_all(
+            [
+                Appointment(
+                    member_id=member.id,
+                    appointment_date=date.today() - timedelta(days=1),
+                    appointment_time=time(9, 0),
+                    status="scheduled",
+                ),
+                Appointment(
+                    member_id=member.id,
+                    appointment_date=date.today(),
+                    appointment_time=(datetime.now() - timedelta(hours=1)).time(),
+                    status="confirmed",
+                ),
+                Appointment(
+                    member_id=member.id,
+                    appointment_date=date.today() + timedelta(days=1),
+                    appointment_time=time(9, 0),
+                    status="cancelled",
+                ),
+                Appointment(
+                    member_id=member.id,
+                    appointment_date=date.today() + timedelta(days=1),
+                    appointment_time=time(10, 0),
+                    status="completed",
+                ),
+                Appointment(
+                    member_id=member.id,
+                    appointment_date=date.today() + timedelta(days=1),
+                    appointment_time=time(11, 0),
+                    status="no_show",
+                ),
+                Appointment(
+                    member_id=member.id,
+                    appointment_date=date.today() + timedelta(days=2),
+                    appointment_time=time(12, 0),
+                    status="scheduled",
+                ),
+            ]
+        )
+        db.session.commit()
+
+        assert google_wallet_next_service_text(member) == (
+            f"{(date.today() + timedelta(days=2)).strftime('%b %d').replace(' 0', ' ')} | 12:00 PM"
+        )
+
+
+def test_public_appointment_requires_owned_vehicle(client):
+    with flask_app.app_context():
+        first_member = Member(
+            name="Appointment Owner",
+            email="appointment-owner@example.com",
+            member_id="COC-00924",
+            expiration_date=date.today() + timedelta(days=365),
+            token="appointment-owner-token",
+        )
+        second_member = Member(
+            name="Other Member",
+            email="other-member@example.com",
+            member_id="COC-00925",
+            expiration_date=date.today() + timedelta(days=365),
+            token="other-member-token",
+        )
+        db.session.add_all([first_member, second_member])
+        db.session.flush()
+        vehicle = Vehicle(member_id=second_member.id, make="Honda", model="Civic")
+        db.session.add(vehicle)
+        db.session.commit()
+        foreign_vehicle_id = vehicle.id
+
+    appointment_date = date.today() + timedelta(days=1)
+    while appointment_date.weekday() == 6:
+        appointment_date += timedelta(days=1)
+    response = client.post(
+        "/m/appointment-owner-token/appointments/new",
+        data={
+            "appointment_date": appointment_date.isoformat(),
+            "appointment_time": "09:00",
+            "vehicle_id": str(foreign_vehicle_id),
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Please select one of your registered vehicles." in response.data
+    with flask_app.app_context():
+        assert Appointment.query.count() == 0
+
+
+def test_public_appointment_without_vehicles_exposes_add_vehicle_and_rejects_missing_vehicle(client):
+    with flask_app.app_context():
+        member = Member(
+            name="No Vehicle Member",
+            email="no-vehicle@example.com",
+            member_id="COC-00926",
+            expiration_date=date.today() + timedelta(days=365),
+            token="no-vehicle-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    page_response = client.get("/m/no-vehicle-token/appointments/new")
+    assert page_response.status_code == 200
+    assert b"+ Add Vehicle" in page_response.data
+
+    appointment_date = date.today() + timedelta(days=1)
+    while appointment_date.weekday() == 6:
+        appointment_date += timedelta(days=1)
+    post_response = client.post(
+        "/m/no-vehicle-token/appointments/new",
+        data={
+            "appointment_date": appointment_date.isoformat(),
+            "appointment_time": "09:00",
+        },
+        follow_redirects=True,
+    )
+    assert post_response.status_code == 200
+    assert b"Please select one of your registered vehicles." in post_response.data
+
+
+@pytest.mark.parametrize("remaining_changes, expiration_offset", [(0, 365), (1, -1)])
+def test_public_appointment_rejects_inactive_membership(client, remaining_changes, expiration_offset):
+    with flask_app.app_context():
+        member = Member(
+            name="Inactive Appointment Member",
+            email=f"inactive-{remaining_changes}-{expiration_offset}@example.com",
+            member_id=f"COC-{remaining_changes}{abs(expiration_offset):04d}",
+            expiration_date=date.today() + timedelta(days=expiration_offset),
+            remaining_changes=remaining_changes,
+            total_changes=1,
+            token=f"inactive-{remaining_changes}-{expiration_offset}-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_token = member.token
+
+    response = client.post(
+        f"/m/{member_token}/appointments/new",
+        data={
+            "appointment_date": (date.today() + timedelta(days=1)).isoformat(),
+            "appointment_time": "09:00",
+            "vehicle_id": "999999",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"This membership is not active and cannot schedule service." in response.data
+    with flask_app.app_context():
+        assert Appointment.query.count() == 0
+
+
+@pytest.mark.parametrize("return_to", ["http://[", "https://evil.example/appointments", "/m/other-member-token/appointments/new"])
+def test_public_vehicle_return_to_rejects_malformed_external_and_wrong_member_paths(client, return_to):
+    with flask_app.app_context():
+        member = Member(
+            name="Return Path Member",
+            email="return-path@example.com",
+            member_id="COC-00927",
+            expiration_date=date.today() + timedelta(days=365),
+            token="return-path-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    response = client.get(
+        "/m/return-path-token/vehicle/register",
+        query_string={"return_to": return_to},
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert b"Back to Membership Card" in response.data
+
+
 def test_google_wallet_upsert_reuses_single_token_for_patch_then_post(client, monkeypatch):
     with flask_app.app_context():
         member = Member(
@@ -409,6 +667,10 @@ def test_google_wallet_class_payload_card_template_override_uses_remaining_chang
     template = payload["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"][0]
     field_path = template["oneItem"]["item"]["firstValue"]["fields"][0]["fieldPath"]
     assert field_path == 'object.textModulesData["remaining_changes"]'
+    next_service_template = payload["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"][1]
+    assert next_service_template["twoItems"]["startItem"]["firstValue"]["fields"][0]["fieldPath"] == (
+        'object.textModulesData["next_service"]'
+    )
 
 
 def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client, monkeypatch):
@@ -431,8 +693,14 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
         payload = google_wallet_member_object_payload(member)
 
     assert payload["id"] == "issuer123.carnova_coc-00915"
+    assert payload["genericType"] == "GENERIC_OTHER"
+    assert payload["hexBackgroundColor"] == "#101820"
+    assert payload["cardTitle"]["defaultValue"]["value"] == "Carnova Oil Club"
+    assert payload["header"]["defaultValue"]["value"] == "Oil Club Premium"
+    assert payload["subheader"]["defaultValue"]["value"] == "Wallet Payload Member"
     assert payload["textModulesData"][0]["id"] == "remaining_changes"
     assert payload["textModulesData"][0]["body"] == "3 OIL CHANGES REMAINING"
+    assert payload["textModulesData"][1]["body"] == "NOT SCHEDULED"
 
     assert payload["logo"]["sourceUri"]["uri"] == "https://cards.carnova.test/static/carnova-logo.png"
     assert len(payload["linksModuleData"]["uris"]) == 1
@@ -444,6 +712,40 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
         "https://cards.carnova.test/m/wallet-payload-token/appointments/new"
     )
     assert payload["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["description"] == "Schedule Oil Change"
+
+
+def test_google_wallet_next_service_text_uses_earliest_active_appointment(client):
+    with flask_app.app_context():
+        member = Member(
+            name="Next Service Member",
+            email="next-service@example.com",
+            member_id="COC-00921",
+            expiration_date=date.today() + timedelta(days=365),
+            token="next-service-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+        db.session.add(
+            Appointment(
+                member_id=member.id,
+                appointment_date=date.today() + timedelta(days=5),
+                appointment_time=time(10, 30),
+                status="scheduled",
+            )
+        )
+        db.session.add(
+            Appointment(
+                member_id=member.id,
+                appointment_date=date.today() + timedelta(days=2),
+                appointment_time=time(9, 0),
+                status="cancelled",
+            )
+        )
+        db.session.commit()
+
+        assert google_wallet_next_service_text(member) == (
+            f"{(date.today() + timedelta(days=5)).strftime('%b %d').replace(' 0', ' ')} | 10:30 AM"
+        )
 
 
 @pytest.mark.parametrize(

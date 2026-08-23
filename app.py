@@ -1738,6 +1738,7 @@ def update_appointment_status(appointment_id):
     appointment.status = new_status
     appointment.internal_notes = request.form.get("internal_notes", appointment.internal_notes or "").strip()
     db.session.commit()
+    sync_member_google_wallet_object(appointment.member)
 
     if new_status == "confirmed":
         send_appointment_email(appointment, "Appointment Confirmed")
@@ -1751,11 +1752,12 @@ def update_appointment_status(appointment_id):
 @app.route("/m/<token>/appointments/new", methods=["GET", "POST"])
 def public_new_appointment(token):
     member = Member.query.filter_by(token=token).first_or_404()
-    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
-
-    if not vehicles:
-        flash("Please register your vehicle before scheduling an appointment.", "error")
+    member.status = current_member_status(member)
+    if member.status != "active":
+        flash("This membership is not active and cannot schedule service.", "error")
         return redirect(url_for("member_public", token=member.token))
+
+    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
 
     selected_date_text = request.values.get("appointment_date", "").strip()
     selected_date = None
@@ -1791,12 +1793,21 @@ def public_new_appointment(token):
                 )
             )
 
-        selected_vehicle = None
         vehicle_id = request.form.get("vehicle_id", "").strip()
+        selected_vehicle = None
         if vehicle_id.isdigit():
             selected_vehicle = Vehicle.query.filter_by(
                 id=int(vehicle_id), member_id=member.id
             ).first()
+        if not selected_vehicle:
+            flash("Please select one of your registered vehicles.", "error")
+            return redirect(
+                url_for(
+                    "public_new_appointment",
+                    token=member.token,
+                    appointment_date=selected_date.isoformat(),
+                )
+            )
 
         appointment = Appointment(
             member_id=member.id,
@@ -1809,6 +1820,7 @@ def public_new_appointment(token):
         )
         db.session.add(appointment)
         db.session.commit()
+        sync_member_google_wallet_object(member)
         send_appointment_email(appointment, "Appointment Scheduled")
 
         return redirect(
@@ -1833,11 +1845,37 @@ def public_new_appointment(token):
 @app.route("/m/<token>/vehicle/register", methods=["GET", "POST"])
 def public_register_vehicle(token):
     member = Member.query.filter_by(token=token).first_or_404()
+    appointment_path = url_for("public_new_appointment", token=member.token)
+    return_to = request.values.get("return_to", "").strip()
+    try:
+        parsed_return_to = parse.urlsplit(return_to)
+    except ValueError:
+        parsed_return_to = None
+    query_values = parse.parse_qs(parsed_return_to.query) if parsed_return_to else {}
+    appointment_dates = query_values.get("appointment_date", [])
+    if (
+        not parsed_return_to
+        or parsed_return_to.scheme
+        or parsed_return_to.netloc
+        or parsed_return_to.fragment
+        or parsed_return_to.path != appointment_path
+        or set(query_values) - {"appointment_date"}
+        or len(appointment_dates) > 1
+    ):
+        return_to = ""
+    elif appointment_dates:
+        try:
+            parsed_date = date.fromisoformat(appointment_dates[0])
+        except ValueError:
+            return_to = ""
+        else:
+            return_to = f"{appointment_path}?{parse.urlencode({'appointment_date': parsed_date.isoformat()})}"
+    else:
+        return_to = appointment_path
 
-    existing_vehicle = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).first()
-    if existing_vehicle:
-        flash("Your membership already has a registered vehicle.", "error")
-        return redirect(url_for("member_public", token=member.token))
+    if is_monthly_membership(member) and Vehicle.query.filter_by(member_id=member.id).first():
+        flash("Monthly Membership allows only one registered vehicle.", "error")
+        return redirect(return_to or url_for("member_public", token=member.token))
 
     form_values = {
         "year": "",
@@ -1888,12 +1926,15 @@ def public_register_vehicle(token):
             db.session.add(vehicle)
             db.session.commit()
             flash("Vehicle registered successfully.", "success")
+            if return_to:
+                return redirect(return_to)
             return redirect(url_for("member_public", token=member.token))
 
     return render_template(
         "public_vehicle_register.html",
         member=member,
         form_values=form_values,
+        return_to=return_to,
     )
 
 
@@ -1920,6 +1961,7 @@ def public_cancel_appointment(token, appointment_id):
     if appointment.status in {"scheduled", "confirmed"} and appointment.starts_at > datetime.now():
         appointment.status = "cancelled"
         db.session.commit()
+        sync_member_google_wallet_object(member)
         send_appointment_email(appointment, "Appointment Cancelled")
         flash("Your appointment has been cancelled.", "success")
     else:
@@ -2280,6 +2322,30 @@ def google_wallet_remaining_changes_text(remaining_changes):
     return f"{remaining_changes} {noun} REMAINING"
 
 
+def google_wallet_next_service_text(member):
+    appointment = (
+        Appointment.query.filter_by(member_id=member.id)
+        .filter(
+            db.or_(
+                Appointment.appointment_date > date.today(),
+                db.and_(
+                    Appointment.appointment_date == date.today(),
+                    Appointment.appointment_time >= datetime.now().time(),
+                ),
+            ),
+            Appointment.status.in_(["scheduled", "confirmed"]),
+        )
+        .order_by(Appointment.appointment_date.asc(), Appointment.appointment_time.asc())
+        .first()
+    )
+    if not appointment:
+        return "NOT SCHEDULED"
+
+    date_text = appointment.appointment_date.strftime("%b %d").replace(" 0", " ")
+    time_text = appointment.appointment_time.strftime("%I:%M %p").lstrip("0")
+    return f"{date_text} | {time_text}"
+
+
 def google_wallet_class_payload():
     return {
         "id": google_wallet_class_id(),
@@ -2298,7 +2364,29 @@ def google_wallet_class_payload():
                                 }
                             }
                         }
-                    }
+                    },
+                    {
+                        "twoItems": {
+                            "startItem": {
+                                "firstValue": {
+                                    "fields": [
+                                        {
+                                            "fieldPath": 'object.textModulesData["next_service"]',
+                                        }
+                                    ]
+                                }
+                            },
+                            "endItem": {
+                                "firstValue": {
+                                    "fields": [
+                                        {
+                                            "fieldPath": 'object.textModulesData["membership_status"]',
+                                        }
+                                    ]
+                                }
+                            },
+                        }
+                    },
                 ]
             }
         },
@@ -2314,15 +2402,22 @@ def google_wallet_member_object_payload(member):
     payload = {
         "id": google_wallet_object_id(member),
         "classId": google_wallet_class_id(),
+        "genericType": "GENERIC_OTHER",
         "state": google_wallet_member_state(member),
-        "cardTitle": {"defaultValue": {"language": "en-US", "value": member.name}},
-        "header": {"defaultValue": {"language": "en-US", "value": member.plan_name or "Prepaid Package"}},
-        "subheader": {"defaultValue": {"language": "en-US", "value": f"Member {member.member_id}"}},
+        "cardTitle": {"defaultValue": {"language": "en-US", "value": "Carnova Oil Club"}},
+        "header": {"defaultValue": {"language": "en-US", "value": "Oil Club Premium"}},
+        "subheader": {"defaultValue": {"language": "en-US", "value": member.name}},
+        "hexBackgroundColor": "#101820",
         "textModulesData": [
             {
                 "id": "remaining_changes",
-                "header": "Oil Change Balance",
+                "header": "Oil Changes Left",
                 "body": google_wallet_remaining_changes_text(member.remaining_changes),
+            },
+            {
+                "id": "next_service",
+                "header": "Next Service",
+                "body": google_wallet_next_service_text(member),
             },
             {
                 "id": "total_changes",
