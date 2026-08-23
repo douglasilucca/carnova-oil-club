@@ -666,10 +666,10 @@ def test_google_wallet_class_payload_card_template_override_uses_remaining_chang
     assert payload["id"] == "issuer123.class123"
     template = payload["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"][0]
     field_path = template["oneItem"]["item"]["firstValue"]["fields"][0]["fieldPath"]
-    assert field_path == 'object.textModulesData["remaining_changes"]'
+    assert field_path == "object.textModulesData['remaining_changes']"
     next_service_template = payload["classTemplateInfo"]["cardTemplateOverride"]["cardRowTemplateInfos"][1]
     assert next_service_template["twoItems"]["startItem"]["firstValue"]["fields"][0]["fieldPath"] == (
-        'object.textModulesData["next_service"]'
+        "object.textModulesData['next_service']"
     )
 
 
