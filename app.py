@@ -2358,7 +2358,7 @@ def google_wallet_class_payload():
                                 "firstValue": {
                                     "fields": [
                                         {
-                                            "fieldPath": 'object.textModulesData["remaining_changes"]',
+                                            "fieldPath": "object.textModulesData['remaining_changes']",
                                         }
                                     ]
                                 }
@@ -2371,7 +2371,7 @@ def google_wallet_class_payload():
                                 "firstValue": {
                                     "fields": [
                                         {
-                                            "fieldPath": 'object.textModulesData["next_service"]',
+                                            "fieldPath": "object.textModulesData['next_service']",
                                         }
                                     ]
                                 }
@@ -2380,7 +2380,7 @@ def google_wallet_class_payload():
                                 "firstValue": {
                                     "fields": [
                                         {
-                                            "fieldPath": 'object.textModulesData["membership_status"]',
+                                            "fieldPath": "object.textModulesData['membership_status']",
                                         }
                                     ]
                                 }
