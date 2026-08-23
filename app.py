@@ -2395,7 +2395,7 @@ def google_wallet_class_payload():
 
 def google_wallet_member_object_payload(member):
     expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
-    logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-logo.png"))
+    logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-wallet-logo-v2.png"))
     manage_package_url = google_wallet_public_https_url(url_for("member_public", token=member.token))
     schedule_oil_change_url = google_wallet_public_https_url(url_for("public_new_appointment", token=member.token))
 

@@ -702,7 +702,7 @@ def test_google_wallet_payload_includes_prominent_balance_logo_and_links(client,
     assert payload["textModulesData"][0]["body"] == "3 OIL CHANGES REMAINING"
     assert payload["textModulesData"][1]["body"] == "NOT SCHEDULED"
 
-    assert payload["logo"]["sourceUri"]["uri"] == "https://cards.carnova.test/static/carnova-logo.png"
+    assert payload["logo"]["sourceUri"]["uri"] == "https://cards.carnova.test/static/carnova-wallet-logo-v2.png"
     assert len(payload["linksModuleData"]["uris"]) == 1
     assert payload["linksModuleData"]["uris"][0]["id"] == "manage_package"
     assert payload["linksModuleData"]["uris"][0]["description"] == "Manage Your Package"
@@ -753,13 +753,13 @@ def test_google_wallet_next_service_text_uses_earliest_active_appointment(client
     [
         (
             "https://example.com",
-            "https://example.com/static/carnova-logo.png",
+            "https://example.com/static/carnova-wallet-logo-v2.png",
             "https://example.com/m/wallet-payload-token",
             "https://example.com/m/wallet-payload-token/appointments/new",
         ),
         (
             "https://example.com/carnova",
-            "https://example.com/carnova/static/carnova-logo.png",
+            "https://example.com/carnova/static/carnova-wallet-logo-v2.png",
             "https://example.com/carnova/m/wallet-payload-token",
             "https://example.com/carnova/m/wallet-payload-token/appointments/new",
         ),
