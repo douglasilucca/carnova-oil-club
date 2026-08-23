@@ -1752,11 +1752,12 @@ def update_appointment_status(appointment_id):
 @app.route("/m/<token>/appointments/new", methods=["GET", "POST"])
 def public_new_appointment(token):
     member = Member.query.filter_by(token=token).first_or_404()
-    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
-
-    if not vehicles:
-        flash("Please register your vehicle before scheduling an appointment.", "error")
+    member.status = current_member_status(member)
+    if member.status != "active":
+        flash("This membership is not active and cannot schedule service.", "error")
         return redirect(url_for("member_public", token=member.token))
+
+    vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
 
     selected_date_text = request.values.get("appointment_date", "").strip()
     selected_date = None
@@ -1792,12 +1793,21 @@ def public_new_appointment(token):
                 )
             )
 
-        selected_vehicle = None
         vehicle_id = request.form.get("vehicle_id", "").strip()
+        selected_vehicle = None
         if vehicle_id.isdigit():
             selected_vehicle = Vehicle.query.filter_by(
                 id=int(vehicle_id), member_id=member.id
             ).first()
+        if not selected_vehicle:
+            flash("Please select one of your registered vehicles.", "error")
+            return redirect(
+                url_for(
+                    "public_new_appointment",
+                    token=member.token,
+                    appointment_date=selected_date.isoformat(),
+                )
+            )
 
         appointment = Appointment(
             member_id=member.id,
@@ -1837,9 +1847,31 @@ def public_register_vehicle(token):
     member = Member.query.filter_by(token=token).first_or_404()
     appointment_path = url_for("public_new_appointment", token=member.token)
     return_to = request.values.get("return_to", "").strip()
-    parsed_return_to = parse.urlsplit(return_to)
-    if parsed_return_to.scheme or parsed_return_to.netloc or parsed_return_to.path != appointment_path:
+    try:
+        parsed_return_to = parse.urlsplit(return_to)
+    except ValueError:
+        parsed_return_to = None
+    query_values = parse.parse_qs(parsed_return_to.query) if parsed_return_to else {}
+    appointment_dates = query_values.get("appointment_date", [])
+    if (
+        not parsed_return_to
+        or parsed_return_to.scheme
+        or parsed_return_to.netloc
+        or parsed_return_to.fragment
+        or parsed_return_to.path != appointment_path
+        or set(query_values) - {"appointment_date"}
+        or len(appointment_dates) > 1
+    ):
         return_to = ""
+    elif appointment_dates:
+        try:
+            parsed_date = date.fromisoformat(appointment_dates[0])
+        except ValueError:
+            return_to = ""
+        else:
+            return_to = f"{appointment_path}?{parse.urlencode({'appointment_date': parsed_date.isoformat()})}"
+    else:
+        return_to = appointment_path
 
     if is_monthly_membership(member) and Vehicle.query.filter_by(member_id=member.id).first():
         flash("Monthly Membership allows only one registered vehicle.", "error")
@@ -2294,7 +2326,13 @@ def google_wallet_next_service_text(member):
     appointment = (
         Appointment.query.filter_by(member_id=member.id)
         .filter(
-            Appointment.appointment_date >= date.today(),
+            db.or_(
+                Appointment.appointment_date > date.today(),
+                db.and_(
+                    Appointment.appointment_date == date.today(),
+                    Appointment.appointment_time >= datetime.now().time(),
+                ),
+            ),
             Appointment.status.in_(["scheduled", "confirmed"]),
         )
         .order_by(Appointment.appointment_date.asc(), Appointment.appointment_time.asc())

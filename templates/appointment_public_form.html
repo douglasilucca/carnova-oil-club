@@ -57,7 +57,7 @@
       </div>
 
       <label>Vehicle
-        <select name="vehicle_id">
+        <select name="vehicle_id" required>
           <option value="" disabled selected>Select a vehicle</option>
           {% for vehicle in vehicles %}
           <option value="{{ vehicle.id }}">{{ vehicle.display_name }}{% if vehicle.plate %} · {{ vehicle.plate }}{% endif %}</option>
