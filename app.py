@@ -2447,24 +2447,21 @@ def apple_wallet_register_device(device_library_identifier, pass_type_identifier
 
 @app.route("/apple-wallet/v1/devices/<device_library_identifier>/registrations/<pass_type_identifier>", methods=["GET"])
 def apple_wallet_changed_passes(device_library_identifier, pass_type_identifier):
-    try:
-        device = AppleWalletDevice.query.filter_by(device_library_identifier=device_library_identifier).first_or_404()
-        pass_record = AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier).first()
-        apple_wallet_require_auth_token(pass_record)
-    except PermissionError:
-        return {"error": "invalid_authentication_token"}, 401
-    except Exception:
+    device = AppleWalletDevice.query.filter_by(device_library_identifier=device_library_identifier).first()
+    if not device:
         return {"error": "device_not_found"}, 404
 
     updated_since = int(request.args.get("passesUpdatedSince", "0") or 0)
     serial_numbers = []
     for registration in AppleWalletRegistration.query.filter_by(device_id=device.id, is_active=True):
         wallet_pass = AppleWalletPass.query.get(registration.pass_id)
-        if wallet_pass and wallet_pass.pass_type_identifier == pass_type_identifier and wallet_pass.last_updated > updated_since:
-            serial_numbers.append(wallet_pass.serial_number)
+        if wallet_pass and wallet_pass.pass_type_identifier == pass_type_identifier:
+            if updated_since == 0 or wallet_pass.last_updated > updated_since:
+                serial_numbers.append(wallet_pass.serial_number)
 
+    pass_record = AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier).first()
     payload = {
-        "lastUpdated": max((pass_record.last_updated for pass_record in [AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier).first()] if pass_record), default=0),
+        "lastUpdated": pass_record.last_updated if pass_record else 0,
         "serialNumbers": sorted(set(serial_numbers)),
         "moreUpdatesAvailable": False,
     }

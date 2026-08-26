@@ -336,32 +336,97 @@ def test_apple_wallet_payload_includes_web_service_and_authentication_token(clie
     assert payload["authenticationToken"] == AppleWalletPass.query.filter_by(member_id=member.id).first().authentication_token
 
 
-def test_apple_wallet_registration_and_changed_pass_polling(client, monkeypatch):
+def test_apple_wallet_device_polling_without_authorization_succeeds(client, monkeypatch):
     monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
     monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
     with flask_app.app_context(), flask_app.test_request_context("/"):
         member = create_member()
         pass_record = AppleWalletPass.create_for_member(member)
-        token = pass_record.authentication_token
         device = AppleWalletDevice.create_or_update("device-abc", "push-token-123")
-        registration = AppleWalletRegistration.register(pass_record, device)
-        assert registration.id is not None
-        assert AppleWalletRegistration.register(pass_record, device).id == registration.id
+        AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
 
-        response = client.post(
-            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}/{pass_record.serial_number}",
-            headers={"Authorization": f"ApplePass {token}"},
-            json={"pushToken": "push-token-123"},
+        response = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}"
         )
-        assert response.status_code in {200, 201}
+        assert response.status_code == 200
+        assert response.get_json()["serialNumbers"] == [pass_record.serial_number]
 
-        poll = client.get(
-            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}?passesUpdatedSince=0",
-            headers={"Authorization": f"ApplePass {token}"},
+
+def test_apple_wallet_device_polling_initial_sync_without_passesUpdatedSince_succeeds(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        device = AppleWalletDevice.create_or_update("device-abc", "push-token-123")
+        AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
+
+        response = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}"
         )
-        assert poll.status_code == 200
-        payload = poll.get_json()
+        assert response.status_code == 200
+        payload = response.get_json()
         assert pass_record.serial_number in payload["serialNumbers"]
+        assert payload["lastUpdated"] == pass_record.last_updated
+
+
+def test_apple_wallet_device_polling_filters_by_passesUpdatedSince(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        device = AppleWalletDevice.create_or_update("device-abc", "push-token-123")
+        AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
+
+        initial = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}?passesUpdatedSince=0"
+        )
+        assert initial.status_code == 200
+        assert pass_record.serial_number in initial.get_json()["serialNumbers"]
+
+        pass_record.mark_updated()
+        db.session.commit()
+
+        filtered = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}?passesUpdatedSince={pass_record.last_updated}"
+        )
+        assert filtered.status_code == 200
+        assert filtered.get_json()["serialNumbers"] == []
+
+
+def test_apple_wallet_device_polling_rejects_unknown_device(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+
+    response = client.get("/apple-wallet/v1/devices/unknown-device/registrations/pass.com.carnovaoil.membership")
+    assert response.status_code == 404
+
+
+def test_apple_wallet_device_polling_is_isolated_per_device(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member_one = create_member(member_id="COC-01001", token="member-one")
+        member_two = create_member(member_id="COC-01002", token="member-two")
+        pass_one = AppleWalletPass.create_for_member(member_one)
+        pass_two = AppleWalletPass.create_for_member(member_two)
+        device_one = AppleWalletDevice.create_or_update("device-one")
+        device_two = AppleWalletDevice.create_or_update("device-two")
+        AppleWalletRegistration.register(pass_one, device_one)
+        AppleWalletRegistration.register(pass_two, device_two)
+        db.session.commit()
+
+        response = client.get(
+            f"/apple-wallet/v1/devices/{device_one.device_library_identifier}/registrations/{pass_one.pass_type_identifier}"
+        )
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert pass_one.serial_number in payload["serialNumbers"]
+        assert pass_two.serial_number not in payload["serialNumbers"]
 
 
 def test_apple_wallet_latest_pass_requires_valid_applepass_auth(client, monkeypatch):
