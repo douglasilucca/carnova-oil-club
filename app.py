@@ -703,6 +703,7 @@ def apple_wallet_next_service_text(member):
 def apple_wallet_payload(member):
     public_url = member_public_url(member)
     schedule_url = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
+    buy_url = f"{resolve_public_base_url()}{url_for('public_member_buy', token=member.token)}"
     vehicle = member_primary_vehicle(member)
     vehicle_text = vehicle.display_name if vehicle else "No vehicle registered"
     status_text = current_member_status(member).replace("_", " ").title()
@@ -752,6 +753,16 @@ def apple_wallet_payload(member):
                     "value": "Tap to manage membership",
                     "attributedValue": f'<a href="{html.escape(public_url, quote=True)}">Manage Membership</a>',
                 },
+                *(
+                    [{
+                        "key": "buy_more_oil_changes",
+                        "label": "Buy More Oil Changes",
+                        "value": "Tap to purchase",
+                        "attributedValue": f'<a href="{html.escape(buy_url, quote=True)}">Tap to purchase</a>',
+                    }]
+                    if member.remaining_changes == 0
+                    else []
+                ),
             ],
         },
     }
@@ -1953,6 +1964,43 @@ def public_member_billing_portal(token):
     if session_url:
         return redirect(session_url)
     return redirect(url_for("member_public", token=member.token))
+
+
+@app.route("/m/<token>/buy")
+def public_member_buy(token):
+    member = Member.query.filter_by(token=token).first_or_404()
+    return render_template("member_buy.html", member=member, plans=stripe_plan_catalog())
+
+
+@app.route("/m/<token>/buy/<path:plan_key>", methods=["POST"])
+def public_member_buy_plan(token, plan_key):
+    member = Member.query.filter_by(token=token).first_or_404()
+    plan = STRIPE_PLANS.get(plan_key)
+    if not plan:
+        return {"error": "plan_not_found"}, 404
+
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+    if not stripe_secret:
+        flash("Purchases are temporarily unavailable. Please try again later.", "error")
+        return redirect(url_for("public_member_buy", token=member.token))
+
+    stripe.api_key = stripe_secret
+    mode = "subscription" if plan["subscription"] else "payment"
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            mode=mode,
+            line_items=[{"price": plan_key, "quantity": 1}],
+            success_url=f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}",
+            cancel_url=f"{resolve_public_base_url()}{url_for('public_member_buy', token=member.token)}",
+            customer_email=member.email,
+            metadata={"member_id": str(member.id), "plan_price_id": plan_key},
+        )
+    except stripe.error.StripeError as error:
+        print("Stripe checkout creation error:", error)
+        flash("We couldn't open checkout right now. Please try again later.", "error")
+        return redirect(url_for("public_member_buy", token=member.token))
+
+    return redirect(checkout_session.url)
 
 
 @app.route("/m/<token>/wallet/add", methods=["POST"])
@@ -3354,6 +3402,26 @@ STRIPE_PLANS = {
 }
 
 
+def stripe_plan_catalog():
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+    if stripe_secret:
+        stripe.api_key = stripe_secret
+    catalog = []
+    for price_id, plan in STRIPE_PLANS.items():
+        details = {"price_id": price_id, **plan, "price_display": "Price shown at checkout"}
+        if stripe_secret:
+            try:
+                price = stripe.Price.retrieve(price_id)
+                amount = price.get("unit_amount")
+                currency = str(price.get("currency") or "usd").upper()
+                if amount is not None:
+                    details["price_display"] = f"{currency} {amount / 100:.2f}"
+            except stripe.error.StripeError:
+                pass
+        catalog.append(details)
+    return catalog
+
+
 def stripe_object_id(value):
     """Return an ID whether Stripe supplied a string or expanded object."""
     if isinstance(value, str):
@@ -3603,7 +3671,9 @@ def process_checkout_completed(obj):
     subscription_status = "active" if selected_plan["subscription"] else None
 
     # Webhook retries and duplicate checkout events must not create duplicate members.
-    existing = find_subscription_member(
+    member_id = metadata.get("member_id")
+    existing = Member.query.get(int(member_id)) if str(member_id or "").isdigit() else None
+    existing = existing or find_subscription_member(
         subscription_id=subscription_id,
         customer_id=customer_id,
         payment_id=payment_id,
@@ -3771,6 +3841,7 @@ def stripe_webhook():
     try:
         if event_type == "checkout.session.completed":
             member, _was_created = process_checkout_completed(obj)
+            wallet_sync_member = member
             ga4_checkout_session = obj
         elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
             invoice_member, benefits_reset = process_invoice_payment_succeeded(obj)
@@ -3802,8 +3873,14 @@ def stripe_webhook():
         send_ga4_purchase_event(ga4_checkout_session)
 
     if wallet_sync_member:
-        sync_member_google_wallet_object(wallet_sync_member)
-        apple_wallet_mark_pass_updated(wallet_sync_member)
+        try:
+            sync_member_google_wallet_object(wallet_sync_member)
+        except Exception as error:
+            print("Google Wallet purchase sync failed:", error)
+        try:
+            apple_wallet_mark_pass_updated(wallet_sync_member)
+        except Exception as error:
+            print("Apple Wallet purchase update failed:", error)
 
     if member:
         print("MEMBERSHIP EMAIL TRIGGERED")

@@ -8,6 +8,7 @@ import stripe
 from app import (
     Admin,
     Appointment,
+    AppleWalletPass,
     Member,
     Redemption,
     ReminderLog,
@@ -22,6 +23,8 @@ from app import (
     google_wallet_next_service_text,
     google_wallet_object_id,
     google_wallet_upsert_member_object,
+    apple_wallet_payload,
+    STRIPE_PLANS,
     run_all_reminders,
     run_appointment_reminders,
     resolve_appointment_reminder_timezone,
@@ -1618,6 +1621,205 @@ def test_checkout_session_completed_creates_monthly_member(client, monkeypatch):
     assert member.subscription_status == "active"
     assert member.total_changes == 3
     assert member.remaining_changes == 3
+
+
+@pytest.mark.parametrize(
+    ("price_id", "mode", "expected_changes"),
+    [
+        ("price_1Tx6veR1GwRFNmYeUO2goMjz", "payment", 3),
+        ("price_1TwiJER1GwRFNmYeeFbUdscR", "payment", 5),
+        ("price_1Tx70UR1GwRFNmYePYn1Xrdz", "payment", 8),
+        ("price_1TxtO7R1GwRFNmYeGo3km5vf", "subscription", 3),
+    ],
+)
+def test_existing_zero_credit_purchase_fulfills_plan_and_syncs_wallets(
+    client, monkeypatch, price_id, mode, expected_changes
+):
+    with flask_app.app_context():
+        member = Member(
+            name="Existing Buyer",
+            email="existing-buyer@example.com",
+            member_id="COC-00020",
+            expiration_date=date.today() + timedelta(days=30),
+            remaining_changes=0,
+            total_changes=3,
+            token="existing-buyer-token",
+            status="completed",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    event = {
+        "id": f"evt_purchase_{expected_changes}_{mode}",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": f"cs_purchase_{expected_changes}_{mode}",
+            "mode": mode,
+            "customer": "cus_existing_buyer",
+            "subscription": "sub_existing_buyer" if mode == "subscription" else None,
+            "payment_intent": "pi_existing_buyer",
+            "customer_details": {"email": "existing-buyer@example.com", "name": "Existing Buyer"},
+            "amount_total": 1000,
+            "metadata": {"member_id": str(member_id)},
+            "shipping_details": {},
+        }},
+    }
+    calls = []
+
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", lambda *_args, **_kwargs: event)
+    monkeypatch.setattr(
+        "app.stripe.checkout.Session.list_line_items",
+        lambda *_args, **_kwargs: {"data": [{"price": {"id": price_id}}]},
+    )
+
+    def fake_google(updated_member):
+        fresh = db.session.get(Member, member_id)
+        calls.append(("google", fresh.remaining_changes))
+        return True
+
+    def fake_apple(updated_member):
+        fresh = db.session.get(Member, member_id)
+        calls.append(("apple", fresh.remaining_changes))
+        return True
+
+    monkeypatch.setattr("app.sync_member_google_wallet_object", fake_google)
+    monkeypatch.setattr("app.apple_wallet_mark_pass_updated", fake_apple)
+
+    response = client.post(
+        "/stripe/webhook",
+        data=json.dumps({"event": "verified"}),
+        headers={"Stripe-Signature": "valid-signature"},
+    )
+
+    assert response.status_code == 200
+    with flask_app.app_context():
+        fulfilled = db.session.get(Member, member_id)
+        assert fulfilled.remaining_changes == expected_changes
+        assert fulfilled.total_changes == max(3, expected_changes)
+    assert calls == [("google", expected_changes), ("apple", expected_changes)]
+
+
+def test_checkout_purchase_wallet_failures_do_not_rollback_fulfillment(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Wallet Failure Buyer",
+            email="wallet-failure@example.com",
+            member_id="COC-00021",
+            expiration_date=date.today() + timedelta(days=30),
+            remaining_changes=0,
+            total_changes=3,
+            token="wallet-failure-token",
+            status="completed",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    event = {
+        "id": "evt_wallet_failure",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs_wallet_failure",
+            "mode": "payment",
+            "customer": "cus_wallet_failure",
+            "payment_intent": "pi_wallet_failure",
+            "customer_details": {"email": "wallet-failure@example.com"},
+            "amount_total": 1000,
+            "metadata": {"member_id": str(member_id)},
+            "shipping_details": {},
+        }},
+    }
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", lambda *_args, **_kwargs: event)
+    monkeypatch.setattr(
+        "app.stripe.checkout.Session.list_line_items",
+        lambda *_args, **_kwargs: {"data": [{"price": {"id": "price_1Tx70UR1GwRFNmYePYn1Xrdz"}}]},
+    )
+    monkeypatch.setattr("app.sync_member_google_wallet_object", lambda _member: (_ for _ in ()).throw(RuntimeError("google")))
+    monkeypatch.setattr("app.apple_wallet_mark_pass_updated", lambda _member: (_ for _ in ()).throw(RuntimeError("apple")))
+
+    response = client.post(
+        "/stripe/webhook",
+        data=json.dumps({"event": "verified"}),
+        headers={"Stripe-Signature": "valid-signature"},
+    )
+
+    assert response.status_code == 200
+    with flask_app.app_context():
+        assert db.session.get(Member, member_id).remaining_changes == 8
+
+
+def test_checkout_purchase_replay_and_invalid_signature_do_not_repeat_fulfillment(client, monkeypatch):
+    with flask_app.app_context():
+        member = Member(
+            name="Replay Buyer",
+            email="replay@example.com",
+            member_id="COC-00022",
+            expiration_date=date.today() + timedelta(days=30),
+            remaining_changes=0,
+            total_changes=3,
+            token="replay-token",
+            status="completed",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    event = {
+        "id": "evt_replay_purchase",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs_replay_purchase",
+            "mode": "payment",
+            "customer": "cus_replay",
+            "payment_intent": "pi_replay",
+            "customer_details": {"email": "replay@example.com"},
+            "amount_total": 1000,
+            "metadata": {"member_id": str(member_id)},
+            "shipping_details": {},
+        }},
+    }
+    calls = []
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", lambda *_args, **_kwargs: event)
+    monkeypatch.setattr(
+        "app.stripe.checkout.Session.list_line_items",
+        lambda *_args, **_kwargs: {"data": [{"price": {"id": "price_1Tx70UR1GwRFNmYePYn1Xrdz"}}]},
+    )
+    monkeypatch.setattr("app.sync_member_google_wallet_object", lambda _member: calls.append("google"))
+    monkeypatch.setattr("app.apple_wallet_mark_pass_updated", lambda _member: calls.append("apple"))
+
+    first = client.post("/stripe/webhook", data=b"{}", headers={"Stripe-Signature": "valid"})
+    second = client.post("/stripe/webhook", data=b"{}", headers={"Stripe-Signature": "valid"})
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls == ["google", "apple"]
+
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad signature")))
+    invalid = client.post("/stripe/webhook", data=b"{}", headers={"Stripe-Signature": "forged"})
+    assert invalid.status_code == 400
+    assert calls == ["google", "apple"]
+
+
+def test_successful_zero_credit_purchase_removes_apple_purchase_field(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = Member(
+            name="Wallet Buyer",
+            email="wallet-buyer@example.com",
+            member_id="COC-00023",
+            expiration_date=date.today() + timedelta(days=30),
+            remaining_changes=0,
+            total_changes=3,
+            token="wallet-buyer-token",
+            status="completed",
+        )
+        db.session.add(member)
+        db.session.commit()
+        pass_record = AppleWalletPass.create_for_member(member)
+        assert any(field["key"] == "buy_more_oil_changes" for field in apple_wallet_payload(member)["generic"]["backFields"])
+        member.remaining_changes = 8
+        db.session.commit()
+        assert not any(field["key"] == "buy_more_oil_changes" for field in apple_wallet_payload(member)["generic"]["backFields"])
 
 
 def test_checkout_session_recovers_missing_customer_id_for_portal_access(client, monkeypatch):
