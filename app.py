@@ -339,6 +339,9 @@ def apple_wallet_next_service_text(member):
 
 def apple_wallet_payload(member):
     public_url = member_public_url(member)
+    schedule_url = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
+    vehicle = member_primary_vehicle(member)
+    vehicle_text = vehicle.display_name if vehicle else "No vehicle registered"
     status_text = current_member_status(member).replace("_", " ").title()
     return {
         "formatVersion": 1,
@@ -368,11 +371,11 @@ def apple_wallet_payload(member):
                 {"key": "next_service", "label": "Next Service", "value": apple_wallet_next_service_text(member)},
             ],
             "backFields": [
+                {"key": "vehicle", "label": "Vehicle", "value": vehicle_text},
+                {"key": "expiration_date", "label": "Expiration", "value": member.expiration_date.strftime("%B %d, %Y")},
                 {"key": "member_id", "label": "Member ID", "value": member.member_id},
-                {"key": "plan_name", "label": "Plan", "value": member.plan_name or "Prepaid Package"},
-                {"key": "expiration_date", "label": "Expires", "value": member.expiration_date.strftime("%B %d, %Y")},
-                {"key": "public_url", "label": "Digital Card", "value": public_url},
-                {"key": "schedule_service", "label": "Schedule Service", "value": f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"},
+                {"key": "schedule_service", "label": "Schedule Service", "value": schedule_url},
+                {"key": "manage_membership", "label": "Manage Membership", "value": public_url},
             ],
         },
     }
