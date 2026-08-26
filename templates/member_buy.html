@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Buy More Oil Changes | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="public-wrap">
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow gold">CARNOVA OIL CLUB</p>
+      <h1>Buy More Oil Changes</h1>
+      <p class="muted">{{ member.name }} · {{ member.member_id }}</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <p class="muted">Choose a plan to continue securely with Stripe.</p>
+    <div class="plans-grid">
+      {% for plan in plans %}
+      <article class="panel plan-card">
+        <p class="eyebrow">{{ plan.name }}</p>
+        <h3>{{ plan.price_display }}</h3>
+        <h2>{{ plan.changes }} oil changes</h2>
+        <p class="muted">Valid for {{ plan.valid_days }} days{% if plan.subscription %} · recurring membership{% endif %}</p>
+        <form method="post" action="{{ url_for('public_member_buy_plan', token=member.token, plan_key=plan.price_id) }}">
+          <button class="button primary" type="submit">Choose {{ plan.name }}</button>
+        </form>
+      </article>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}

@@ -27,6 +27,8 @@ from app import (
     apple_wallet_send_push_for_pass,
     db,
     google_wallet_member_object_payload,
+    process_checkout_completed,
+    STRIPE_PLANS,
 )
 from app import app as flask_app
 
@@ -186,6 +188,7 @@ def test_apple_wallet_payload_includes_member_schedule_service_url(client, monke
     assert schedule_field == {
         "key": "schedule_service",
         "label": "Schedule Service",
+        "value": "Tap to schedule service",
         "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token/appointments/new">Schedule Service</a>',
     }
 
@@ -206,14 +209,117 @@ def test_apple_wallet_payload_includes_portal_back_fields(client, monkeypatch):
         {
             "key": "schedule_service",
             "label": "Schedule Service",
+            "value": "Tap to schedule service",
             "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token/appointments/new">Schedule Service</a>',
         },
         {
             "key": "manage_membership",
             "label": "Manage Membership",
+            "value": "Tap to manage membership",
             "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token">Manage Membership</a>',
         },
     ]
+
+
+def test_apple_wallet_payload_shows_purchase_action_only_at_zero_credits(client, monkeypatch):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member(remaining_changes=0)
+        payload = apple_wallet_payload(member)
+        purchase_field = next(
+            field for field in payload["generic"]["backFields"] if field["key"] == "buy_more_oil_changes"
+        )
+        assert purchase_field == {
+            "key": "buy_more_oil_changes",
+            "label": "Buy More Oil Changes",
+            "value": "Tap to purchase",
+            "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token/buy">Tap to purchase</a>',
+        }
+
+        member.remaining_changes = 1
+        db.session.commit()
+        refreshed = apple_wallet_payload(member)
+        assert not any(field["key"] == "buy_more_oil_changes" for field in refreshed["generic"]["backFields"])
+
+
+def test_member_purchase_page_requires_valid_token_and_shows_configured_plans(client, monkeypatch):
+    with flask_app.app_context():
+        member = create_member()
+        member_token = member.token
+
+    invalid = client.get("/m/not-a-member/buy")
+    assert invalid.status_code == 404
+
+    response = client.get(f"/m/{member_token}/buy")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    for plan in STRIPE_PLANS.values():
+        assert plan["name"] in body
+        assert f"{plan['changes']} oil changes" in body
+
+
+def test_member_purchase_checkout_uses_server_plan_configuration(client, monkeypatch):
+    with flask_app.app_context():
+        member = create_member()
+        captured = {}
+        member_token = member.token
+        member_id = member.id
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_not_logged")
+
+    class FakeSession:
+        url = "https://checkout.stripe.test/session"
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return FakeSession()
+
+    monkeypatch.setattr("app.stripe.checkout.Session.create", fake_create)
+    response = client.post(f"/m/{member_token}/buy/{next(iter(STRIPE_PLANS))}")
+    assert response.status_code == 302
+    assert response.headers["Location"] == FakeSession.url
+    assert captured["mode"] == "payment"
+    assert captured["line_items"] == [{"price": next(iter(STRIPE_PLANS)), "quantity": 1}]
+    assert captured["metadata"]["member_id"] == str(member_id)
+    assert captured["success_url"].endswith(f"/m/{member_token}")
+    assert captured["cancel_url"].endswith(f"/m/{member_token}/buy")
+
+    monthly_price_id = next(price_id for price_id, plan in STRIPE_PLANS.items() if plan["subscription"])
+    client.post(f"/m/{member.token}/buy/{monthly_price_id}")
+    assert captured["mode"] == "subscription"
+
+
+def test_member_purchase_invalid_plan_is_rejected(client):
+    with flask_app.app_context():
+        member = create_member()
+        member_token = member.token
+
+    response = client.post(f"/m/{member_token}/buy/price_not_configured")
+    assert response.status_code == 404
+
+
+def test_checkout_metadata_associates_existing_member_without_granting_from_redirect(client, monkeypatch):
+    with flask_app.app_context():
+        member = create_member(remaining_changes=0, total_changes=3)
+        before = member.remaining_changes
+        price_id = next(iter(STRIPE_PLANS))
+        monkeypatch.setattr(
+            "app.stripe.checkout.Session.list_line_items",
+            lambda *_args, **_kwargs: {"data": [{"price": {"id": price_id}}]},
+        )
+        fulfilled, created = process_checkout_completed(
+            {
+                "id": "cs_test_member_metadata",
+                "mode": "payment",
+                "metadata": {"member_id": str(member.id)},
+                "customer_details": {"email": member.email, "name": member.name},
+                "payment_intent": "pi_test_member_metadata",
+                "amount_total": 1000,
+            }
+        )
+        assert fulfilled.id == member.id
+        assert created is False
+        assert member.remaining_changes == max(before, STRIPE_PLANS[price_id]["changes"])
 
 
 def test_apple_wallet_logo_asset_is_wide_header_resource():
