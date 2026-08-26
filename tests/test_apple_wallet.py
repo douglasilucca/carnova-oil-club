@@ -12,6 +12,7 @@ from PIL import Image
 
 from app import (
     AppleWalletDevice,
+    AppleWalletChangeSequence,
     AppleWalletPass,
     AppleWalletRegistration,
     Appointment,
@@ -398,6 +399,85 @@ def test_apple_wallet_device_polling_filters_by_passesUpdatedSince(client, monke
         )
         assert filtered.status_code == 200
         assert filtered.get_json()["serialNumbers"] == []
+
+
+def test_apple_wallet_device_polling_cursor_tracks_registered_passes(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        unrelated_member = create_member(member_id="COC-01001", token="unrelated-member")
+        registered_member = create_member(member_id="COC-01002", token="registered-member")
+        unrelated_pass = AppleWalletPass.create_for_member(unrelated_member)
+        registered_pass = AppleWalletPass.create_for_member(registered_member)
+        unrelated_pass.last_updated = 100
+        db.session.commit()
+        device = AppleWalletDevice.create_or_update("device-cursor", "push-token-cursor")
+        AppleWalletRegistration.register(registered_pass, device)
+        db.session.commit()
+
+        initial = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{registered_pass.pass_type_identifier}"
+        )
+        initial_cursor = initial.get_json()["lastUpdated"]
+        assert initial_cursor == registered_pass.last_updated
+
+        monkeypatch.setattr("app.apple_wallet_send_push_for_pass", lambda _pass_record: True)
+        assert apple_wallet_mark_pass_updated(registered_member) is True
+        db.session.expire_all()
+        registered_pass = AppleWalletPass.query.filter_by(member_id=registered_member.id).first()
+        assert registered_pass.last_updated > initial_cursor
+
+        changed = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{registered_pass.pass_type_identifier}?passesUpdatedSince={initial_cursor}"
+        )
+        payload = changed.get_json()
+        assert payload["serialNumbers"] == [registered_pass.serial_number]
+        assert unrelated_pass.serial_number not in payload["serialNumbers"]
+
+
+def test_apple_wallet_appointment_commits_before_pass_update_push(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        vehicle = Vehicle(member_id=member.id, year="2022", make="Toyota", model="Camry")
+        pass_record = AppleWalletPass.create_for_member(member)
+        db.session.add(vehicle)
+        db.session.commit()
+        before = pass_record.last_updated
+        observed = []
+
+        monkeypatch.setattr("app.sync_member_google_wallet_object", lambda _member: False)
+
+        def fake_push(pass_record_arg):
+            fresh_pass = db.session.get(AppleWalletPass, pass_record_arg.id)
+            observed.append(
+                (
+                    Appointment.query.filter_by(member_id=member.id).count(),
+                    fresh_pass.last_updated,
+                )
+            )
+            return True
+
+        monkeypatch.setattr("app.apple_wallet_send_push_for_pass", fake_push)
+        appointment_date = date.today() + timedelta(days=1)
+        while appointment_date.weekday() == 6:
+            appointment_date += timedelta(days=1)
+        response = client.post(
+            f"/m/{member.token}/appointments/new",
+            data={
+                "appointment_date": appointment_date.isoformat(),
+                "appointment_time": "09:00",
+                "vehicle_id": str(vehicle.id),
+                "service_type": "Oil Change",
+            },
+        )
+
+        assert response.status_code == 302
+        db.session.expire_all()
+        fresh_pass = AppleWalletPass.query.filter_by(member_id=member.id).first()
+        assert Appointment.query.filter_by(member_id=member.id).count() == 1
+        assert fresh_pass.last_updated > before
+        assert observed == [(1, fresh_pass.last_updated)]
+        assert AppleWalletChangeSequence.query.get(1).value == fresh_pass.last_updated
 
 
 def test_apple_wallet_device_polling_rejects_unknown_device(client, monkeypatch):
