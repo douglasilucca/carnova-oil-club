@@ -153,9 +153,16 @@ class AppleWalletPass(db.Model):
         return apple_wallet_decrypt_token(encrypted, nonce)
 
     def mark_updated(self):
-        self.last_updated = (int(self.last_updated) if self.last_updated is not None else 0) + 1
+        sequence = AppleWalletChangeSequence.query.with_for_update().filter_by(id=1).first()
+        if sequence is None:
+            sequence = AppleWalletChangeSequence(id=1, value=0)
+            db.session.add(sequence)
+            db.session.flush()
+        sequence.value = max(int(sequence.value or 0), int(self.last_updated or 0)) + 1
+        self.last_updated = sequence.value
         self.updated_at = datetime.utcnow()
         db.session.add(self)
+        print(f"Apple Wallet pass change sequence advanced to {self.last_updated}")
         return self.last_updated
 
 
@@ -302,6 +309,11 @@ class Appointment(db.Model):
     @property
     def starts_at(self):
         return datetime.combine(self.appointment_date, self.appointment_time)
+
+
+class AppleWalletChangeSequence(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    value = db.Column(db.BigInteger, nullable=False, default=0)
 
 
 class Redemption(db.Model):
@@ -575,7 +587,9 @@ def apple_wallet_send_push_for_pass(pass_record):
             response = client.post(url, json={}, headers=headers)
             if response.status_code in (200, 201):
                 pushed = True
+                print(f"Apple Wallet APNs accepted status={response.status_code}")
             elif response.status_code == 400:
+                print(f"Apple Wallet APNs rejected status={response.status_code}")
                 try:
                     error_data = response.json()
                     reason = error_data.get("reason", "").lower()
@@ -590,6 +604,7 @@ def apple_wallet_send_push_for_pass(pass_record):
                 except Exception:
                     pass
             elif response.status_code == 410:
+                print(f"Apple Wallet APNs rejected status={response.status_code}")
                 try:
                     error_data = response.json()
                     reason = error_data.get("reason", "").lower()
@@ -603,6 +618,8 @@ def apple_wallet_send_push_for_pass(pass_record):
                             db.session.rollback()
                 except Exception:
                     pass
+            else:
+                print(f"Apple Wallet APNs rejected status={response.status_code}")
         except Exception:
             pass
     if hasattr(client, "close"):
@@ -2570,18 +2587,21 @@ def apple_wallet_changed_passes(device_library_identifier, pass_type_identifier)
 
     updated_since = int(request.args.get("passesUpdatedSince", "0") or 0)
     serial_numbers = []
+    registered_passes = []
     for registration in AppleWalletRegistration.query.filter_by(device_id=device.id, is_active=True):
         wallet_pass = AppleWalletPass.query.get(registration.pass_id)
         if wallet_pass and wallet_pass.pass_type_identifier == pass_type_identifier:
+            registered_passes.append(wallet_pass)
             if updated_since == 0 or wallet_pass.last_updated > updated_since:
                 serial_numbers.append(wallet_pass.serial_number)
 
-    pass_record = AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier).first()
+    last_updated = max((wallet_pass.last_updated for wallet_pass in registered_passes), default=0)
     payload = {
-        "lastUpdated": pass_record.last_updated if pass_record else 0,
+        "lastUpdated": last_updated,
         "serialNumbers": sorted(set(serial_numbers)),
         "moreUpdatesAvailable": False,
     }
+    print(f"Apple Wallet polling cursor={last_updated} serial_count={len(payload['serialNumbers'])}")
     return payload, 200
 
 
