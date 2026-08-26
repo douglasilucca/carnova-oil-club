@@ -2585,7 +2585,11 @@ def apple_wallet_changed_passes(device_library_identifier, pass_type_identifier)
     if not device:
         return {"error": "device_not_found"}, 404
 
-    updated_since = int(request.args.get("passesUpdatedSince", "0") or 0)
+    updated_since_tag = request.args.get("passesUpdatedSince") or "0"
+    try:
+        updated_since = int(updated_since_tag)
+    except (TypeError, ValueError):
+        updated_since = 0
     serial_numbers = []
     registered_passes = []
     for registration in AppleWalletRegistration.query.filter_by(device_id=device.id, is_active=True):
@@ -2596,10 +2600,12 @@ def apple_wallet_changed_passes(device_library_identifier, pass_type_identifier)
                 serial_numbers.append(wallet_pass.serial_number)
 
     last_updated = max((wallet_pass.last_updated for wallet_pass in registered_passes), default=0)
+    if not serial_numbers:
+        print(f"Apple Wallet polling cursor={last_updated} serial_count=0")
+        return "", 204
     payload = {
-        "lastUpdated": last_updated,
         "serialNumbers": sorted(set(serial_numbers)),
-        "moreUpdatesAvailable": False,
+        "lastUpdated": str(last_updated),
     }
     print(f"Apple Wallet polling cursor={last_updated} serial_count={len(payload['serialNumbers'])}")
     return payload, 200
@@ -2642,6 +2648,19 @@ def apple_wallet_latest_pass(pass_type_identifier, serial_number):
 
 @app.route("/apple-wallet/v1/log", methods=["POST"])
 def apple_wallet_log():
+    body = request.get_json(silent=True)
+    messages = body.get("logs", []) if isinstance(body, dict) else []
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, str):
+                continue
+            sanitized = re.sub(r"https?://[^\s]+|/[^\s]*", "[redacted-url]", message)
+            sanitized = re.sub(
+                r"(?i)(authenticationtoken|pushtoken|devicelibraryidentifier|encryption[_ -]?key|certificate|private[_ -]?key)\s*[:=]\s*[^\s,;]+",
+                r"\1=[redacted]",
+                sanitized,
+            )
+            print(f"Apple Wallet diagnostic: {sanitized[:500]}")
     return {"status": "ok"}, 200
 
 
