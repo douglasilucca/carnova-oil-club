@@ -196,7 +196,17 @@ def test_apple_wallet_bundle_contains_required_files_and_invokes_signing(client,
         }
 
     assert {"pass.json", "manifest.json", "signature"}.issubset(names)
-    assert set(manifest).issubset(names - {"manifest.json", "signature"})
+    assert not any(name.endswith(".pkpass") for name in names)
+    assert names == {
+        "icon.png",
+        "icon@2x.png",
+        "logo.png",
+        "logo@2x.png",
+        "manifest.json",
+        "pass.json",
+        "signature",
+    }
+    assert set(manifest) == names - {"manifest.json", "signature"}
     assert manifest == packaged_hashes
     assert pass_payload["serialNumber"].startswith("carnova-")
     assert len(signing_calls) == 1

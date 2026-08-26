@@ -442,7 +442,9 @@ def apple_wallet_build_bundle(member):
     bundle_path = base_dir / f"{member.member_id}.pkpass"
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         for file_path in sorted(base_dir.iterdir()):
-            if file_path.name in {"manifest.json", "signature"} or file_path.name.endswith(".pkpass"):
+            if file_path == bundle_path:
+                continue
+            if file_path.name in {"manifest.json", "signature"}:
                 bundle.write(file_path, arcname=file_path.name)
             elif file_path.is_file():
                 bundle.write(file_path, arcname=file_path.name)
