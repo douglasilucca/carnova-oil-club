@@ -339,6 +339,9 @@ def apple_wallet_next_service_text(member):
 
 def apple_wallet_payload(member):
     public_url = member_public_url(member)
+    schedule_url = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
+    vehicle = member_primary_vehicle(member)
+    vehicle_text = vehicle.display_name if vehicle else "No vehicle registered"
     status_text = current_member_status(member).replace("_", " ").title()
     return {
         "formatVersion": 1,
@@ -368,10 +371,11 @@ def apple_wallet_payload(member):
                 {"key": "next_service", "label": "Next Service", "value": apple_wallet_next_service_text(member)},
             ],
             "backFields": [
+                {"key": "vehicle", "label": "Vehicle", "value": vehicle_text},
+                {"key": "expiration_date", "label": "Expiration", "value": member.expiration_date.strftime("%B %d, %Y")},
                 {"key": "member_id", "label": "Member ID", "value": member.member_id},
-                {"key": "plan_name", "label": "Plan", "value": member.plan_name or "Prepaid Package"},
-                {"key": "expiration_date", "label": "Expires", "value": member.expiration_date.strftime("%B %d, %Y")},
-                {"key": "public_url", "label": "Digital Card", "value": public_url},
+                {"key": "schedule_service", "label": "Schedule Service", "value": schedule_url},
+                {"key": "manage_membership", "label": "Manage Membership", "value": public_url},
             ],
         },
     }
@@ -392,14 +396,15 @@ def apple_wallet_build_bundle(member):
         raise FileNotFoundError("Apple Wallet signing files are not configured in the runtime environment.")
 
     base_dir = Path(tempfile.mkdtemp(prefix="apple-wallet-pass-"))
-    source_logo = Path(__file__).resolve().parent / "static" / "carnova-wallet-logo-v2.png"
-    if not source_logo.exists():
-        source_logo = Path(__file__).resolve().parent / "static" / "carnova-logo.png"
-    if not source_logo.exists():
+    source_icon = Path(__file__).resolve().parent / "static" / "carnova-wallet-logo-v2.png"
+    if not source_icon.exists():
+        source_icon = Path(__file__).resolve().parent / "static" / "carnova-logo.png"
+    source_logo = Path(__file__).resolve().parent / "static" / "carnova-apple-wallet-logo.png"
+    if not source_icon.exists() or not source_logo.exists():
         raise FileNotFoundError("Apple Wallet logo asset is missing from static assets.")
 
-    apple_wallet_create_image_asset(source_logo, base_dir / "icon.png", (29, 29))
-    apple_wallet_create_image_asset(source_logo, base_dir / "icon@2x.png", (58, 58))
+    apple_wallet_create_image_asset(source_icon, base_dir / "icon.png", (29, 29))
+    apple_wallet_create_image_asset(source_icon, base_dir / "icon@2x.png", (58, 58))
     apple_wallet_create_image_asset(source_logo, base_dir / "logo.png", (160, 50))
     apple_wallet_create_image_asset(source_logo, base_dir / "logo@2x.png", (320, 100))
 

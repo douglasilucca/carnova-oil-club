@@ -5,12 +5,15 @@ import subprocess
 import zipfile
 from datetime import date, time, timedelta
 from io import BytesIO
+from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from app import (
     Appointment,
     Member,
+    Vehicle,
     apple_wallet_build_bundle,
     apple_wallet_member_serial,
     apple_wallet_next_service_text,
@@ -156,6 +159,57 @@ def test_apple_wallet_barcode_uses_public_member_url(client, monkeypatch):
     assert payload["barcode"]["message"] == "https://cards.carnova.test/m/apple-wallet-token"
 
 
+def test_apple_wallet_payload_includes_member_schedule_service_url(client, monkeypatch):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member()
+        payload = apple_wallet_payload(member)
+
+    schedule_field = next(
+        field for field in payload["generic"]["backFields"] if field["key"] == "schedule_service"
+    )
+    assert schedule_field == {
+        "key": "schedule_service",
+        "label": "Schedule Service",
+        "value": "https://cards.carnova.test/m/apple-wallet-token/appointments/new",
+    }
+
+
+def test_apple_wallet_payload_includes_portal_back_fields(client, monkeypatch):
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member()
+        db.session.add(Vehicle(member_id=member.id, year="2022", make="Toyota", model="Camry"))
+        db.session.commit()
+        payload = apple_wallet_payload(member)
+
+    assert payload["generic"]["backFields"] == [
+        {"key": "vehicle", "label": "Vehicle", "value": "2022 Toyota Camry"},
+        {"key": "expiration_date", "label": "Expiration", "value": member.expiration_date.strftime("%B %d, %Y")},
+        {"key": "member_id", "label": "Member ID", "value": "COC-01001"},
+        {
+            "key": "schedule_service",
+            "label": "Schedule Service",
+            "value": "https://cards.carnova.test/m/apple-wallet-token/appointments/new",
+        },
+        {
+            "key": "manage_membership",
+            "label": "Manage Membership",
+            "value": "https://cards.carnova.test/m/apple-wallet-token",
+        },
+    ]
+
+
+def test_apple_wallet_logo_asset_is_wide_header_resource():
+    logo_path = Path(__file__).resolve().parents[1] / "static" / "carnova-apple-wallet-logo.png"
+
+    with Image.open(logo_path) as logo:
+        assert logo.format == "PNG"
+        assert logo.size == (320, 100)
+
+
 def test_apple_wallet_bundle_contains_required_files_and_invokes_signing(client, monkeypatch, tmp_path):
     with flask_app.app_context(), flask_app.test_request_context("/"):
         member = create_member()
@@ -169,9 +223,15 @@ def test_apple_wallet_bundle_contains_required_files_and_invokes_signing(client,
             "app.apple_wallet_secret_paths",
             lambda: {"cert": str(cert), "key": str(key), "wwdr": str(wwdr)},
         )
+        image_sources = []
+
+        def fake_image_asset(source, target, _size):
+            image_sources.append(source.name)
+            target.write_bytes(b"test png")
+
         monkeypatch.setattr(
             "app.apple_wallet_create_image_asset",
-            lambda _source, target, _size: target.write_bytes(b"test png"),
+            fake_image_asset,
         )
         signing_calls = []
 
@@ -206,6 +266,12 @@ def test_apple_wallet_bundle_contains_required_files_and_invokes_signing(client,
         "pass.json",
         "signature",
     }
+    assert image_sources == [
+        "carnova-wallet-logo-v2.png",
+        "carnova-wallet-logo-v2.png",
+        "carnova-apple-wallet-logo.png",
+        "carnova-apple-wallet-logo.png",
+    ]
     assert set(manifest) == names - {"manifest.json", "signature"}
     assert manifest == packaged_hashes
     assert pass_payload["serialNumber"].startswith("carnova-")
