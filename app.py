@@ -1,5 +1,7 @@
+import base64
 import csv
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -14,6 +16,7 @@ from pathlib import Path
 from urllib import error as urllib_error, parse, request as urllib_request
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from google.auth import jwt as google_jwt
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
@@ -71,6 +74,159 @@ class Member(db.Model):
         "Redemption", backref="member", lazy=True, cascade="all, delete-orphan"
     )
 
+
+
+class AppleWalletPass(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False, index=True)
+    pass_type_identifier = db.Column(db.String(255), nullable=False, default=lambda: os.environ.get("APPLE_PASS_TYPE_ID", "pass.com.carnovaoil.membership"))
+    serial_number = db.Column(db.String(255), nullable=False)
+    authentication_token_encrypted = db.Column(db.Text, nullable=False)
+    authentication_token_nonce = db.Column(db.String(64), nullable=False)
+    authentication_token_hash = db.Column(db.String(128), nullable=False)
+    web_service_url = db.Column(db.Text, nullable=False)
+    last_updated = db.Column(db.BigInteger, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    member = db.relationship("Member", backref=db.backref("apple_wallet_pass", uselist=False, cascade="all, delete-orphan"))
+    registrations = db.relationship("AppleWalletRegistration", backref="pass_record", lazy=True, cascade="all, delete-orphan")
+
+    __table_args__ = (
+        db.UniqueConstraint("pass_type_identifier", "serial_number", name="uq_apple_wallet_pass_serial"),
+        db.UniqueConstraint("member_id", "pass_type_identifier", "serial_number", name="uq_apple_wallet_member_pass_serial"),
+    )
+
+    @classmethod
+    def encryption_key(cls):
+        key = os.environ.get("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "").strip()
+        if not key:
+            raise RuntimeError(
+                "APPLE_PASS_TOKEN_ENCRYPTION_KEY is not configured. Set a stable secret for Apple PassKit live updates."
+            )
+        return hashlib.sha256(key.encode("utf-8")).digest()
+
+    @classmethod
+    def create_for_member(cls, member):
+        if not member:
+            return None
+        existing = cls.query.filter_by(member_id=member.id).first()
+        if existing:
+            return existing
+        token = secrets.token_urlsafe(32)
+        encrypted, nonce = apple_wallet_encrypt_token(token)
+        pass_record = cls(
+            member_id=member.id,
+            pass_type_identifier=os.environ.get("APPLE_PASS_TYPE_ID", "pass.com.carnovaoil.membership").strip(),
+            serial_number=apple_wallet_member_serial(member),
+            authentication_token_encrypted=encrypted,
+            authentication_token_nonce=nonce,
+            authentication_token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            web_service_url=apple_wallet_web_service_url(),
+            last_updated=1,
+        )
+        db.session.add(pass_record)
+        db.session.commit()
+        return pass_record
+
+    @classmethod
+    def get_or_create_for_member(cls, member):
+        if not member:
+            return None
+        pass_record = cls.query.filter_by(member_id=member.id).first()
+        if pass_record:
+            return pass_record
+        return cls.create_for_member(member)
+
+    @property
+    def authentication_token(self):
+        record = self
+        if not getattr(self, "_sa_instance_state", None) or self._sa_instance_state.session is None:
+            record = db.session.get(AppleWalletPass, self.id)
+        if record is None:
+            raise ValueError("Apple Wallet pass token is missing.")
+        encrypted = getattr(record, "authentication_token_encrypted", None)
+        nonce = getattr(record, "authentication_token_nonce", None)
+        if not encrypted:
+            raise ValueError("Apple Wallet pass token is missing.")
+        return apple_wallet_decrypt_token(encrypted, nonce)
+
+    def mark_updated(self):
+        self.last_updated = (int(self.last_updated) if self.last_updated is not None else 0) + 1
+        self.updated_at = datetime.utcnow()
+        db.session.add(self)
+        return self.last_updated
+
+
+class AppleWalletDevice(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    device_library_identifier = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    push_token_encrypted = db.Column(db.Text, nullable=True)
+    push_token_nonce = db.Column(db.String(64), nullable=True)
+    push_token_hash = db.Column(db.String(128), nullable=True)
+    last_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    registrations = db.relationship("AppleWalletRegistration", backref="device", lazy=True, cascade="all, delete-orphan")
+
+    @classmethod
+    def create_or_update(cls, device_library_identifier, push_token=None):
+        device = cls.query.filter_by(device_library_identifier=device_library_identifier).first()
+        if not device:
+            device = cls(device_library_identifier=device_library_identifier)
+            db.session.add(device)
+        device.is_active = True
+        device.last_seen_at = datetime.utcnow()
+        if push_token:
+            encrypted, nonce = apple_wallet_encrypt_token(push_token)
+            device.push_token_encrypted = encrypted
+            device.push_token_nonce = nonce
+            device.push_token_hash = hashlib.sha256(push_token.encode("utf-8")).hexdigest()
+        db.session.add(device)
+        return device
+
+
+class AppleWalletRegistration(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    pass_id = db.Column(db.Integer, db.ForeignKey("apple_wallet_pass.id"), nullable=False, index=True)
+    device_id = db.Column(db.Integer, db.ForeignKey("apple_wallet_device.id"), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_seen_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        db.UniqueConstraint("pass_id", "device_id", name="uq_apple_wallet_registration"),
+    )
+
+    @classmethod
+    def register(cls, pass_record, device):
+        if not pass_record or not device:
+            return None
+        registration = cls.query.filter_by(pass_id=pass_record.id, device_id=device.id).first()
+        if not registration:
+            registration = cls(pass_id=pass_record.id, device_id=device.id)
+            db.session.add(registration)
+            db.session.flush()
+        registration.is_active = True
+        registration.last_seen_at = datetime.utcnow()
+        registration.updated_at = datetime.utcnow()
+        db.session.add(registration)
+        return registration
+
+    @classmethod
+    def unregister(cls, pass_record, device):
+        if not pass_record or not device:
+            return None
+        registration = cls.query.filter_by(pass_id=pass_record.id, device_id=device.id).first()
+        if registration:
+            registration.is_active = False
+            registration.last_seen_at = datetime.utcnow()
+            registration.updated_at = datetime.utcnow()
+            db.session.add(registration)
+        return registration
 
 
 class StripeEvent(db.Model):
@@ -319,6 +475,78 @@ def apple_wallet_member_serial(member):
     return f"carnova-{digest[:24]}"
 
 
+def apple_wallet_web_service_url():
+    configured = os.environ.get("APPLE_WEB_SERVICE_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    base = resolve_public_base_url()
+    if not base:
+        return "https://example.com/apple-wallet"
+    return f"{base}/apple-wallet"
+
+
+def apple_wallet_encrypt_token(token):
+    key = AppleWalletPass.encryption_key()
+    nonce = os.urandom(12)
+    encrypted = AESGCM(key).encrypt(nonce, token.encode("utf-8"), None)
+    return base64.b64encode(encrypted).decode("utf-8"), base64.b64encode(nonce).decode("utf-8")
+
+
+def apple_wallet_decrypt_token(encrypted_token, nonce_value):
+    key = AppleWalletPass.encryption_key()
+    ciphertext = base64.b64decode(encrypted_token.encode("utf-8"))
+    nonce = base64.b64decode(nonce_value.encode("utf-8"))
+    decrypted = AESGCM(key).decrypt(nonce, ciphertext, None)
+    return decrypted.decode("utf-8")
+
+
+def apple_wallet_validate_token(pass_record, supplied_token):
+    if not pass_record or not supplied_token:
+        return False
+    record = pass_record
+    if not getattr(pass_record, "_sa_instance_state", None) or pass_record._sa_instance_state.session is None:
+        record = db.session.get(AppleWalletPass, pass_record.id)
+    if record is None:
+        return False
+    expected = getattr(record, "authentication_token_hash", "")
+    if hashlib.sha256(supplied_token.encode("utf-8")).hexdigest() != expected:
+        return False
+    try:
+        decrypted_token = apple_wallet_decrypt_token(getattr(record, "authentication_token_encrypted", ""), getattr(record, "authentication_token_nonce", ""))
+    except Exception:
+        return False
+    return hmac.compare_digest(supplied_token, decrypted_token)
+
+
+def apple_wallet_require_auth_token(pass_record=None, auth_header=None):
+    header = auth_header or request.headers.get("Authorization", "")
+    if not header or not header.lower().startswith("applepass "):
+        raise PermissionError("Missing or malformed ApplePass authorization header.")
+    supplied_token = header.split(" ", 1)[1].strip()
+    if not supplied_token:
+        raise PermissionError("ApplePass authorization token is empty.")
+    if pass_record and not apple_wallet_validate_token(pass_record, supplied_token):
+        raise PermissionError("Invalid ApplePass authorization token.")
+    return supplied_token
+
+
+def apple_wallet_mark_pass_updated(member):
+    if not member:
+        return False
+    try:
+        pass_record = AppleWalletPass.get_or_create_for_member(member)
+        if not pass_record:
+            return False
+        pass_record.mark_updated()
+        db.session.add(pass_record)
+        db.session.commit()
+        return True
+    except Exception as error:
+        db.session.rollback()
+        print(f"Apple Wallet pass update tag bump failed for {member.member_id}: {error}")
+        return False
+
+
 def apple_wallet_next_service_text(member):
     appointment = (
         Appointment.query.filter_by(member_id=member.id)
@@ -343,6 +571,7 @@ def apple_wallet_payload(member):
     vehicle = member_primary_vehicle(member)
     vehicle_text = vehicle.display_name if vehicle else "No vehicle registered"
     status_text = current_member_status(member).replace("_", " ").title()
+    pass_record = AppleWalletPass.get_or_create_for_member(member)
     return {
         "formatVersion": 1,
         "passTypeIdentifier": os.environ.get("APPLE_PASS_TYPE_ID", ""),
@@ -354,6 +583,8 @@ def apple_wallet_payload(member):
         "foregroundColor": "rgb(255,255,255)",
         "backgroundColor": "rgb(19,16,12)",
         "labelColor": "rgb(230,190,95)",
+        "webServiceURL": pass_record.web_service_url,
+        "authenticationToken": pass_record.authentication_token,
         "barcode": {
             "format": "PKBarcodeFormatQR",
             "message": public_url,
@@ -1666,6 +1897,7 @@ def edit_member(member_id):
             }
             if old_wallet_values != new_wallet_values:
                 sync_member_google_wallet_object(member)
+                apple_wallet_mark_pass_updated(member)
         except (ValueError, TypeError):
             db.session.rollback()
             flash("Please verify the information entered.", "error")
@@ -1722,6 +1954,7 @@ def redeem(member_id):
         )
         db.session.commit()
         sync_member_google_wallet_object(member)
+        apple_wallet_mark_pass_updated(member)
         flash("Oil change redeemed successfully.", "success")
 
     return redirect(url_for("member_detail", member_id=member.member_id))
@@ -1745,6 +1978,7 @@ def undo(member_id):
         member.status = current_member_status(member)
         db.session.commit()
         sync_member_google_wallet_object(member)
+        apple_wallet_mark_pass_updated(member)
         flash("Last redemption was undone.", "success")
     else:
         flash("No redemption to undo.", "error")
@@ -1899,6 +2133,7 @@ def update_appointment_status(appointment_id):
     appointment.internal_notes = request.form.get("internal_notes", appointment.internal_notes or "").strip()
     db.session.commit()
     sync_member_google_wallet_object(appointment.member)
+    apple_wallet_mark_pass_updated(appointment.member)
 
     if new_status == "confirmed":
         send_appointment_email(appointment, "Appointment Confirmed")
@@ -1981,6 +2216,7 @@ def public_new_appointment(token):
         db.session.add(appointment)
         db.session.commit()
         sync_member_google_wallet_object(member)
+        apple_wallet_mark_pass_updated(member)
         send_appointment_email(appointment, "Appointment Scheduled")
 
         return redirect(
@@ -2122,6 +2358,7 @@ def public_cancel_appointment(token, appointment_id):
         appointment.status = "cancelled"
         db.session.commit()
         sync_member_google_wallet_object(member)
+        apple_wallet_mark_pass_updated(member)
         send_appointment_email(appointment, "Appointment Cancelled")
         flash("Your appointment has been cancelled.", "success")
     else:
@@ -2185,6 +2422,93 @@ def member_apple_wallet(token):
         as_attachment=True,
         download_name=f"{member.member_id}-membership.pkpass",
     )
+
+
+@app.route("/apple-wallet/v1/devices/<device_library_identifier>/registrations/<pass_type_identifier>/<serial_number>", methods=["POST", "DELETE"])
+def apple_wallet_register_device(device_library_identifier, pass_type_identifier, serial_number):
+    try:
+        pass_record = AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier, serial_number=serial_number).first_or_404()
+        apple_wallet_require_auth_token(pass_record)
+    except PermissionError:
+        return {"error": "invalid_authentication_token"}, 401
+    except Exception:
+        return {"error": "pass_not_found"}, 404
+
+    device = AppleWalletDevice.create_or_update(device_library_identifier, request.json.get("pushToken") if request.is_json else None)
+    if request.method == "POST":
+        AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
+        return {"status": "ok"}, 200
+
+    AppleWalletRegistration.unregister(pass_record, device)
+    db.session.commit()
+    return {"status": "ok"}, 200
+
+
+@app.route("/apple-wallet/v1/devices/<device_library_identifier>/registrations/<pass_type_identifier>", methods=["GET"])
+def apple_wallet_changed_passes(device_library_identifier, pass_type_identifier):
+    try:
+        device = AppleWalletDevice.query.filter_by(device_library_identifier=device_library_identifier).first_or_404()
+        pass_record = AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier).first()
+        apple_wallet_require_auth_token(pass_record)
+    except PermissionError:
+        return {"error": "invalid_authentication_token"}, 401
+    except Exception:
+        return {"error": "device_not_found"}, 404
+
+    updated_since = int(request.args.get("passesUpdatedSince", "0") or 0)
+    serial_numbers = []
+    for registration in AppleWalletRegistration.query.filter_by(device_id=device.id, is_active=True):
+        wallet_pass = AppleWalletPass.query.get(registration.pass_id)
+        if wallet_pass and wallet_pass.pass_type_identifier == pass_type_identifier and wallet_pass.last_updated > updated_since:
+            serial_numbers.append(wallet_pass.serial_number)
+
+    payload = {
+        "lastUpdated": max((pass_record.last_updated for pass_record in [AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier).first()] if pass_record), default=0),
+        "serialNumbers": sorted(set(serial_numbers)),
+        "moreUpdatesAvailable": False,
+    }
+    return payload, 200
+
+
+@app.route("/apple-wallet/v1/passes/<pass_type_identifier>/<serial_number>")
+def apple_wallet_latest_pass(pass_type_identifier, serial_number):
+    pass_record = AppleWalletPass.query.filter_by(pass_type_identifier=pass_type_identifier, serial_number=serial_number).first()
+    if not pass_record:
+        return {"error": "pass_not_found"}, 404
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header or not auth_header.lower().startswith("applepass "):
+        return {"error": "invalid_authentication_token"}, 401
+
+    supplied_token = auth_header.split(" ", 1)[1].strip()
+    if not supplied_token:
+        return {"error": "invalid_authentication_token"}, 401
+
+    if not apple_wallet_validate_token(pass_record, supplied_token):
+        other = AppleWalletPass.query.filter_by(authentication_token_hash=hashlib.sha256(supplied_token.encode("utf-8")).hexdigest()).first()
+        if other and other.id != pass_record.id:
+            return {"error": "forbidden"}, 403
+        return {"error": "invalid_authentication_token"}, 401
+
+    try:
+        bundle_path = apple_wallet_build_bundle(pass_record.member)
+    except FileNotFoundError:
+        return "Apple Wallet is not configured for this environment.", 503
+    except subprocess.CalledProcessError:
+        return "Apple Wallet pass signing failed.", 500
+
+    return send_file(
+        bundle_path,
+        mimetype="application/vnd.apple.pkpass",
+        as_attachment=False,
+        download_name=f"{pass_record.member.member_id}-membership.pkpass",
+    )
+
+
+@app.route("/apple-wallet/v1/log", methods=["POST"])
+def apple_wallet_log():
+    return {"status": "ok"}, 200
 
 
 @app.route("/members/<member_id>/qr")
@@ -3315,6 +3639,7 @@ def stripe_webhook():
 
     if wallet_sync_member:
         sync_member_google_wallet_object(wallet_sync_member)
+        apple_wallet_mark_pass_updated(wallet_sync_member)
 
     if member:
         print("MEMBERSHIP EMAIL TRIGGERED")
