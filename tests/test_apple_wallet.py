@@ -11,6 +11,9 @@ import pytest
 from PIL import Image
 
 from app import (
+    AppleWalletDevice,
+    AppleWalletPass,
+    AppleWalletRegistration,
     Appointment,
     Member,
     Vehicle,
@@ -18,6 +21,7 @@ from app import (
     apple_wallet_member_serial,
     apple_wallet_next_service_text,
     apple_wallet_payload,
+    apple_wallet_require_auth_token,
     db,
     google_wallet_member_object_payload,
 )
@@ -25,7 +29,8 @@ from app import app as flask_app
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "test-apple-pass-key-0123456789abcdef")
     flask_app.config.update(
         TESTING=True,
         SECRET_KEY="test-secret",
@@ -67,6 +72,12 @@ def test_apple_wallet_serial_is_deterministic(client):
     assert first == second
     assert first.startswith("carnova-")
     assert len(first) == len("carnova-") + 24
+
+
+def test_apple_wallet_requires_stable_encryption_key_when_missing(monkeypatch):
+    monkeypatch.delenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="APPLE_PASS_TOKEN_ENCRYPTION_KEY"):
+        AppleWalletPass.encryption_key()
 
 
 def test_apple_wallet_payload_contains_member_balance_and_status(client, monkeypatch):
@@ -295,6 +306,143 @@ def test_apple_wallet_download_route_returns_pkpass(client, monkeypatch):
     assert response.mimetype == "application/vnd.apple.pkpass"
     assert response.data == b"fake pkpass"
     assert "COC-01001-membership.pkpass" in response.headers["Content-Disposition"]
+
+
+def test_apple_wallet_pass_has_stable_persisted_authentication_token(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.query.filter_by(member_id=member.id).first()
+        if not pass_record:
+            pass_record = AppleWalletPass.create_for_member(member)
+        first = pass_record.authentication_token
+        second = pass_record.authentication_token
+        assert first == second
+        assert first != member.token
+        assert pass_record.authentication_token_hash
+        assert pass_record.authentication_token_encrypted != first
+        assert "ApplePass" not in pass_record.authentication_token_encrypted
+
+
+def test_apple_wallet_payload_includes_web_service_and_authentication_token(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member()
+        payload = apple_wallet_payload(member)
+
+    assert payload["webServiceURL"] == "https://cards.carnova.test/apple-wallet"
+    assert payload["authenticationToken"]
+    assert payload["authenticationToken"] == AppleWalletPass.query.filter_by(member_id=member.id).first().authentication_token
+
+
+def test_apple_wallet_registration_and_changed_pass_polling(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context(), flask_app.test_request_context("/"):
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        token = pass_record.authentication_token
+        device = AppleWalletDevice.create_or_update("device-abc", "push-token-123")
+        registration = AppleWalletRegistration.register(pass_record, device)
+        assert registration.id is not None
+        assert AppleWalletRegistration.register(pass_record, device).id == registration.id
+
+        response = client.post(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}/{pass_record.serial_number}",
+            headers={"Authorization": f"ApplePass {token}"},
+            json={"pushToken": "push-token-123"},
+        )
+        assert response.status_code in {200, 201}
+
+        poll = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}?passesUpdatedSince=0",
+            headers={"Authorization": f"ApplePass {token}"},
+        )
+        assert poll.status_code == 200
+        payload = poll.get_json()
+        assert pass_record.serial_number in payload["serialNumbers"]
+
+
+def test_apple_wallet_latest_pass_requires_valid_applepass_auth(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        token = pass_record.authentication_token
+        pass_type = pass_record.pass_type_identifier
+        serial = pass_record.serial_number
+
+    monkeypatch.setattr("app.apple_wallet_build_bundle", lambda _member: BytesIO(b"fake pkpass"))
+
+    valid = client.get(
+        f"/apple-wallet/v1/passes/{pass_type}/{serial}",
+        headers={"Authorization": f"ApplePass {token}"},
+    )
+    assert valid.status_code == 200
+
+    invalid = client.get(
+        f"/apple-wallet/v1/passes/{pass_type}/{serial}",
+        headers={"Authorization": "ApplePass wrong-token"},
+    )
+    assert invalid.status_code == 401
+
+
+def test_apple_wallet_registration_rejects_cross_member_access(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context():
+        member_one = create_member(member_id="COC-01001", token="member-one")
+        member_two = create_member(member_id="COC-01002", token="member-two")
+        pass_one = AppleWalletPass.create_for_member(member_one)
+        pass_two = AppleWalletPass.create_for_member(member_two)
+        token = pass_one.authentication_token
+        pass_type = pass_two.pass_type_identifier
+        serial = pass_two.serial_number
+
+    monkeypatch.setattr("app.apple_wallet_build_bundle", lambda _member: BytesIO(b"fake pkpass"))
+
+    response = client.get(
+        f"/apple-wallet/v1/passes/{pass_type}/{serial}",
+        headers={"Authorization": f"ApplePass {token}"},
+    )
+    assert response.status_code == 403
+
+
+def test_apple_wallet_update_tag_bumps_after_redeem_and_undo(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    with flask_app.app_context():
+        member = create_member(remaining_changes=1, total_changes=1)
+        pass_record = AppleWalletPass.create_for_member(member)
+        before = pass_record.last_updated
+        member.remaining_changes = 0
+        member.status = "active"
+        pass_record.mark_updated()
+        after = pass_record.last_updated
+        assert after > before
+
+        member.remaining_changes = 1
+        pass_record.mark_updated()
+        assert pass_record.last_updated > after
+
+
+def test_apple_wallet_update_failure_does_not_rollback_business_transaction(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member(remaining_changes=2)
+        AppleWalletPass.create_for_member(member)
+        member.remaining_changes = 1
+        original = member.remaining_changes
+        try:
+            with flask_app.app_context():
+                member.remaining_changes = 0
+                db.session.commit()
+                raise RuntimeError("simulated wallet update failure")
+        except RuntimeError:
+            pass
+        assert member.remaining_changes == 0
 
 
 def test_apple_wallet_download_route_rejects_invalid_token(client, monkeypatch):
