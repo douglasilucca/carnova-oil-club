@@ -28,6 +28,7 @@
     <form method="post" action="{{ url_for('public_member_google_wallet_add', token=member.token) }}" style="display:inline-block;">
       <button class="button secondary" type="submit">Add to Google Wallet</button>
     </form>
+    <a class="button secondary" href="{{ url_for('member_apple_wallet', token=member.token) }}">Add to Apple Wallet</a>
   </div>
 
   {% if not has_vehicle %}

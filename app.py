@@ -1,11 +1,16 @@
 import csv
+import hashlib
 import json
 import os
 import re
 import secrets
+import subprocess
+import tempfile
+import zipfile
 from datetime import date, datetime, timedelta, time, tzinfo
 from functools import wraps
 from io import BytesIO, StringIO
+from pathlib import Path
 from urllib import error as urllib_error, parse, request as urllib_request
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -295,6 +300,154 @@ def resolve_public_base_url():
 
 def member_public_url(member):
     return f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}"
+
+
+def apple_wallet_secret_paths():
+    cert_path = os.environ.get("APPLE_PASS_CERT_PATH") or "/etc/secrets/apple_pass_cert.pem"
+    key_path = os.environ.get("APPLE_PASS_KEY_PATH") or "/etc/secrets/apple_pass_key.pem"
+    wwdr_path = os.environ.get("APPLE_PASS_WWDR_PATH") or "/etc/secrets/apple_wwdr.pem"
+    return {
+        "cert": cert_path,
+        "key": key_path,
+        "wwdr": wwdr_path,
+    }
+
+
+def apple_wallet_member_serial(member):
+    source = f"{member.id}:{member.member_id}:{member.token}:{member.email}".encode("utf-8")
+    digest = hashlib.sha256(source).hexdigest()
+    return f"carnova-{digest[:24]}"
+
+
+def apple_wallet_next_service_text(member):
+    appointment = (
+        Appointment.query.filter_by(member_id=member.id)
+        .filter(
+            Appointment.appointment_date >= date.today(),
+            Appointment.status.in_(["scheduled", "confirmed"]),
+        )
+        .order_by(Appointment.appointment_date.asc(), Appointment.appointment_time.asc())
+        .first()
+    )
+    if not appointment:
+        return "No upcoming service"
+    return (
+        f"{appointment.appointment_date.strftime('%b %d, %Y')} "
+        f"{appointment.appointment_time.strftime('%I:%M %p')}"
+    )
+
+
+def apple_wallet_payload(member):
+    public_url = member_public_url(member)
+    status_text = current_member_status(member).replace("_", " ").title()
+    return {
+        "formatVersion": 1,
+        "passTypeIdentifier": os.environ.get("APPLE_PASS_TYPE_ID", ""),
+        "serialNumber": apple_wallet_member_serial(member),
+        "teamIdentifier": os.environ.get("APPLE_TEAM_ID", ""),
+        "organizationName": "Carnova Oil Club",
+        "description": "Carnova Oil Club Membership",
+        "logoText": "Carnova Oil Club Premium",
+        "foregroundColor": "rgb(255,255,255)",
+        "backgroundColor": "rgb(19,16,12)",
+        "labelColor": "rgb(230,190,95)",
+        "barcode": {
+            "format": "PKBarcodeFormatQR",
+            "message": public_url,
+            "messageEncoding": "iso-8859-1",
+        },
+        "generic": {
+            "primaryFields": [
+                {"key": "member_name", "label": "Member", "value": member.name},
+            ],
+            "secondaryFields": [
+                {"key": "remaining_changes", "label": "Oil Changes Left", "value": str(member.remaining_changes)},
+                {"key": "status", "label": "Membership Status", "value": status_text},
+            ],
+            "auxiliaryFields": [
+                {"key": "next_service", "label": "Next Service", "value": apple_wallet_next_service_text(member)},
+            ],
+            "backFields": [
+                {"key": "member_id", "label": "Member ID", "value": member.member_id},
+                {"key": "plan_name", "label": "Plan", "value": member.plan_name or "Prepaid Package"},
+                {"key": "expiration_date", "label": "Expires", "value": member.expiration_date.strftime("%B %d, %Y")},
+                {"key": "public_url", "label": "Digital Card", "value": public_url},
+            ],
+        },
+    }
+
+
+def apple_wallet_create_image_asset(source_path, target_path, size):
+    from PIL import Image
+
+    image = Image.open(source_path).convert("RGBA")
+    image = image.resize(size, Image.LANCZOS)
+    image.save(target_path, format="PNG")
+
+
+def apple_wallet_build_bundle(member):
+    secret_paths = apple_wallet_secret_paths()
+    missing = [path for path in secret_paths.values() if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError("Apple Wallet signing files are not configured in the runtime environment.")
+
+    base_dir = Path(tempfile.mkdtemp(prefix="apple-wallet-pass-"))
+    source_logo = Path(__file__).resolve().parent / "static" / "carnova-wallet-logo-v2.png"
+    if not source_logo.exists():
+        source_logo = Path(__file__).resolve().parent / "static" / "carnova-logo.png"
+    if not source_logo.exists():
+        raise FileNotFoundError("Apple Wallet logo asset is missing from static assets.")
+
+    apple_wallet_create_image_asset(source_logo, base_dir / "icon.png", (29, 29))
+    apple_wallet_create_image_asset(source_logo, base_dir / "icon@2x.png", (58, 58))
+    apple_wallet_create_image_asset(source_logo, base_dir / "logo.png", (160, 50))
+    apple_wallet_create_image_asset(source_logo, base_dir / "logo@2x.png", (320, 100))
+
+    pass_json = apple_wallet_payload(member)
+    (base_dir / "pass.json").write_text(json.dumps(pass_json, indent=2), encoding="utf-8")
+
+    manifest = {}
+    for file_name in sorted(path.name for path in base_dir.iterdir() if path.is_file() and path.name not in {"manifest.json", "signature"}):
+        file_path = base_dir / file_name
+        manifest[file_name] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+
+    (base_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    signature_path = base_dir / "signature"
+    subprocess.run(
+        [
+            "openssl",
+            "cms",
+            "-sign",
+            "-binary",
+            "-in",
+            str(base_dir / "manifest.json"),
+            "-signer",
+            secret_paths["cert"],
+            "-inkey",
+            secret_paths["key"],
+            "-certfile",
+            secret_paths["wwdr"],
+            "-outform",
+            "DER",
+            "-out",
+            str(signature_path),
+            "-md",
+            "sha256",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    bundle_path = base_dir / f"{member.member_id}.pkpass"
+    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for file_path in sorted(base_dir.iterdir()):
+            if file_path.name in {"manifest.json", "signature"} or file_path.name.endswith(".pkpass"):
+                bundle.write(file_path, arcname=file_path.name)
+            elif file_path.is_file():
+                bundle.write(file_path, arcname=file_path.name)
+
+    return bundle_path
 
 
 def monthly_membership_defaults(reference_date=None):
@@ -2006,6 +2159,24 @@ def member_public(token):
         primary_vehicle=primary_vehicle,
         redemptions=redemptions,
         upcoming_appointments=upcoming_appointments,
+    )
+
+
+@app.route("/m/<token>/apple-wallet")
+def member_apple_wallet(token):
+    member = Member.query.filter_by(token=token).first_or_404()
+    try:
+        bundle_path = apple_wallet_build_bundle(member)
+    except FileNotFoundError:
+        return "Apple Wallet is not configured for this environment.", 503
+    except subprocess.CalledProcessError:
+        return "Apple Wallet pass signing failed.", 500
+
+    return send_file(
+        bundle_path,
+        mimetype="application/vnd.apple.pkpass",
+        as_attachment=True,
+        download_name=f"{member.member_id}-membership.pkpass",
     )
 
 
