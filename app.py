@@ -25,6 +25,7 @@ import stripe
 from flask import Flask, Response, flash, has_request_context, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import UniqueConstraint, inspect, text
+from sqlalchemy.orm.exc import DetachedInstanceError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
@@ -186,6 +187,15 @@ class AppleWalletDevice(db.Model):
             device.push_token_hash = hashlib.sha256(push_token.encode("utf-8")).hexdigest()
         db.session.add(device)
         return device
+
+    @property
+    def push_token(self):
+        if not self.push_token_encrypted or not self.push_token_nonce:
+            return None
+        try:
+            return apple_wallet_decrypt_token(self.push_token_encrypted, self.push_token_nonce)
+        except Exception:
+            return None
 
 
 class AppleWalletRegistration(db.Model):
@@ -500,6 +510,109 @@ def apple_wallet_decrypt_token(encrypted_token, nonce_value):
     return decrypted.decode("utf-8")
 
 
+def apple_wallet_apns_client():
+    cert_path = os.environ.get("APPLE_PASS_CERT_PATH") or "/etc/secrets/apple_pass_cert.pem"
+    key_path = os.environ.get("APPLE_PASS_KEY_PATH") or "/etc/secrets/apple_pass_key.pem"
+    if not os.path.exists(cert_path) or not os.path.exists(key_path):
+        return None
+    try:
+        import httpx
+    except Exception:
+        return None
+    try:
+        client = httpx.Client(
+            base_url="https://api.push.apple.com",
+            cert=(cert_path, key_path),
+            http2=True,
+            timeout=10.0,
+        )
+        return client
+    except Exception:
+        return None
+
+
+def apple_wallet_send_push_for_pass(pass_record):
+    if not pass_record:
+        return False
+
+    pass_id = None
+    state = getattr(pass_record, "_sa_instance_state", None)
+    if state is not None and getattr(state, "identity", None) is not None:
+        pass_id = state.identity[0]
+    if pass_id is None:
+        try:
+            pass_id = pass_record.id
+        except DetachedInstanceError:
+            pass_id = None
+
+    if pass_id is None:
+        return False
+
+    record = pass_record
+    if not state or state.session is None:
+        record = db.session.get(AppleWalletPass, pass_id)
+    if record is None:
+        return False
+
+    registrations = AppleWalletRegistration.query.filter_by(pass_id=pass_id, is_active=True).all()
+    if not registrations:
+        return False
+
+    client = apple_wallet_apns_client()
+    if client is None:
+        return False
+
+    pushed = False
+    for registration in registrations:
+        device = registration.device
+        if not device or not device.push_token:
+            continue
+        try:
+            url = f"/3/device/{device.push_token}"
+            headers = {
+                "apns-topic": record.pass_type_identifier,
+            }
+            response = client.post(url, json={}, headers=headers)
+            if response.status_code in (200, 201):
+                pushed = True
+            elif response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    reason = error_data.get("reason", "").lower()
+                    if "baddevicetoken" in reason or "devicetokennotfortopic" in reason:
+                        registration.is_active = False
+                        registration.updated_at = datetime.utcnow()
+                        db.session.add(registration)
+                        try:
+                            db.session.commit()
+                        except Exception:
+                            db.session.rollback()
+                except Exception:
+                    pass
+            elif response.status_code == 410:
+                try:
+                    error_data = response.json()
+                    reason = error_data.get("reason", "").lower()
+                    if "unregistered" in reason or "expiredtoken" in reason or "expired token" in reason:
+                        registration.is_active = False
+                        registration.updated_at = datetime.utcnow()
+                        db.session.add(registration)
+                        try:
+                            db.session.commit()
+                        except Exception:
+                            db.session.rollback()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if hasattr(client, "close"):
+        try:
+            client.close()
+        except Exception:
+            pass
+    return pushed
+
+
 def apple_wallet_validate_token(pass_record, supplied_token):
     if not pass_record or not supplied_token:
         return False
@@ -540,6 +653,10 @@ def apple_wallet_mark_pass_updated(member):
         pass_record.mark_updated()
         db.session.add(pass_record)
         db.session.commit()
+        try:
+            apple_wallet_send_push_for_pass(pass_record)
+        except Exception:
+            pass
         return True
     except Exception as error:
         db.session.rollback()
