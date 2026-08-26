@@ -743,11 +743,13 @@ def apple_wallet_payload(member):
                 {
                     "key": "schedule_service",
                     "label": "Schedule Service",
+                    "value": "Tap to schedule service",
                     "attributedValue": f'<a href="{html.escape(schedule_url, quote=True)}">Schedule Service</a>',
                 },
                 {
                     "key": "manage_membership",
                     "label": "Manage Membership",
+                    "value": "Tap to manage membership",
                     "attributedValue": f'<a href="{html.escape(public_url, quote=True)}">Manage Membership</a>',
                 },
             ],
