@@ -409,7 +409,7 @@ def apple_wallet_build_bundle(member):
     manifest = {}
     for file_name in sorted(path.name for path in base_dir.iterdir() if path.is_file() and path.name not in {"manifest.json", "signature"}):
         file_path = base_dir / file_name
-        manifest[file_name] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        manifest[file_name] = hashlib.sha1(file_path.read_bytes()).hexdigest()
 
     (base_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

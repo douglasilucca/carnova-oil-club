@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import zipfile
@@ -189,9 +190,14 @@ def test_apple_wallet_bundle_contains_required_files_and_invokes_signing(client,
         names = set(bundle.namelist())
         pass_payload = json.loads(bundle.read("pass.json"))
         manifest = json.loads(bundle.read("manifest.json"))
+        packaged_hashes = {
+            name: hashlib.sha1(bundle.read(name)).hexdigest()
+            for name in manifest
+        }
 
     assert {"pass.json", "manifest.json", "signature"}.issubset(names)
-    assert manifest["pass.json"]
+    assert set(manifest).issubset(names - {"manifest.json", "signature"})
+    assert manifest == packaged_hashes
     assert pass_payload["serialNumber"].startswith("carnova-")
     assert len(signing_calls) == 1
     command, kwargs = signing_calls[0]
