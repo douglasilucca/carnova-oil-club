@@ -18,10 +18,12 @@ from app import (
     Member,
     Vehicle,
     apple_wallet_build_bundle,
+    apple_wallet_mark_pass_updated,
     apple_wallet_member_serial,
     apple_wallet_next_service_text,
     apple_wallet_payload,
     apple_wallet_require_auth_token,
+    apple_wallet_send_push_for_pass,
     db,
     google_wallet_member_object_payload,
 )
@@ -473,6 +475,99 @@ def test_apple_wallet_registration_rejects_cross_member_access(client, monkeypat
         headers={"Authorization": f"ApplePass {token}"},
     )
     assert response.status_code == 403
+
+
+def test_apple_wallet_send_push_for_pass_targets_active_registrations(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        device_one = AppleWalletDevice.create_or_update("device-one", "push-one")
+        device_two = AppleWalletDevice.create_or_update("device-two", "push-two")
+        AppleWalletRegistration.register(pass_record, device_one)
+        AppleWalletRegistration.register(pass_record, device_two)
+        db.session.commit()
+
+        sent = []
+
+        class FakeResponse:
+            def __init__(self, status_code=200):
+                self.status_code = status_code
+            def json(self):
+                return {}
+
+        class FakeClient:
+            def post(self, url, json=None, headers=None):
+                sent.append({"url": url, "json": json, "headers": headers})
+                return FakeResponse(200)
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.apple_wallet_apns_client", lambda: FakeClient())
+        assert apple_wallet_send_push_for_pass(pass_record) is True
+        assert len(sent) == 2
+        assert sent[0]["url"] == "/3/device/push-one"
+        assert sent[1]["url"] == "/3/device/push-two"
+        assert all(item["json"] == {} for item in sent)
+        assert all(item["headers"]["apns-topic"] == pass_record.pass_type_identifier for item in sent)
+        assert all("apns-push-type" not in item["headers"] for item in sent)
+
+
+def test_apple_wallet_send_push_for_pass_skips_empty_registrations(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+
+    monkeypatch.setattr("app.apple_wallet_apns_client", lambda: object())
+    assert apple_wallet_send_push_for_pass(pass_record) is False
+
+
+def test_apple_wallet_send_push_for_pass_invalidates_bad_device_token(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        device = AppleWalletDevice.create_or_update("device-invalid", "push-bad")
+        registration = AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
+
+        class FakeResponse:
+            def __init__(self, status_code=400):
+                self.status_code = status_code
+            def json(self):
+                return {"reason": "BadDeviceToken"}
+
+        class FakeClient:
+            def post(self, url, json=None, headers=None):
+                return FakeResponse(400)
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.apple_wallet_apns_client", lambda: FakeClient())
+        assert apple_wallet_send_push_for_pass(pass_record) is False
+        db.session.refresh(registration)
+        assert registration.is_active is False
+
+
+def test_apple_wallet_mark_pass_updated_triggers_best_effort_push(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        device = AppleWalletDevice.create_or_update("device-push", "push-token")
+        AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
+
+        calls = []
+
+        def fake_push(pass_record_arg):
+            calls.append(pass_record_arg.id)
+            return True
+
+        monkeypatch.setattr("app.apple_wallet_send_push_for_pass", fake_push)
+        assert apple_wallet_mark_pass_updated(member) is True
+        assert calls == [pass_record.id]
 
 
 def test_apple_wallet_update_tag_bumps_after_redeem_and_undo(client, monkeypatch):
