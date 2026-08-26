@@ -186,7 +186,7 @@ def test_apple_wallet_payload_includes_member_schedule_service_url(client, monke
     assert schedule_field == {
         "key": "schedule_service",
         "label": "Schedule Service",
-        "value": "https://cards.carnova.test/m/apple-wallet-token/appointments/new",
+        "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token/appointments/new">Schedule Service</a>',
     }
 
 
@@ -206,12 +206,12 @@ def test_apple_wallet_payload_includes_portal_back_fields(client, monkeypatch):
         {
             "key": "schedule_service",
             "label": "Schedule Service",
-            "value": "https://cards.carnova.test/m/apple-wallet-token/appointments/new",
+            "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token/appointments/new">Schedule Service</a>',
         },
         {
             "key": "manage_membership",
             "label": "Manage Membership",
-            "value": "https://cards.carnova.test/m/apple-wallet-token",
+            "attributedValue": '<a href="https://cards.carnova.test/m/apple-wallet-token">Manage Membership</a>',
         },
     ]
 
