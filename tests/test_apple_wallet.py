@@ -353,7 +353,10 @@ def test_apple_wallet_device_polling_without_authorization_succeeds(client, monk
             f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}"
         )
         assert response.status_code == 200
-        assert response.get_json()["serialNumbers"] == [pass_record.serial_number]
+        payload = response.get_json()
+        assert set(payload) == {"serialNumbers", "lastUpdated"}
+        assert payload["serialNumbers"] == [pass_record.serial_number]
+        assert isinstance(payload["lastUpdated"], str)
 
 
 def test_apple_wallet_device_polling_initial_sync_without_passesUpdatedSince_succeeds(client, monkeypatch):
@@ -372,7 +375,7 @@ def test_apple_wallet_device_polling_initial_sync_without_passesUpdatedSince_suc
         assert response.status_code == 200
         payload = response.get_json()
         assert pass_record.serial_number in payload["serialNumbers"]
-        assert payload["lastUpdated"] == pass_record.last_updated
+        assert payload["lastUpdated"] == str(pass_record.last_updated)
 
 
 def test_apple_wallet_device_polling_filters_by_passesUpdatedSince(client, monkeypatch):
@@ -397,8 +400,8 @@ def test_apple_wallet_device_polling_filters_by_passesUpdatedSince(client, monke
         filtered = client.get(
             f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}?passesUpdatedSince={pass_record.last_updated}"
         )
-        assert filtered.status_code == 200
-        assert filtered.get_json()["serialNumbers"] == []
+        assert filtered.status_code == 204
+        assert filtered.data == b""
 
 
 def test_apple_wallet_device_polling_cursor_tracks_registered_passes(client, monkeypatch):
@@ -418,13 +421,14 @@ def test_apple_wallet_device_polling_cursor_tracks_registered_passes(client, mon
             f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{registered_pass.pass_type_identifier}"
         )
         initial_cursor = initial.get_json()["lastUpdated"]
-        assert initial_cursor == registered_pass.last_updated
+        assert isinstance(initial_cursor, str)
+        assert initial_cursor == str(registered_pass.last_updated)
 
         monkeypatch.setattr("app.apple_wallet_send_push_for_pass", lambda _pass_record: True)
         assert apple_wallet_mark_pass_updated(registered_member) is True
         db.session.expire_all()
         registered_pass = AppleWalletPass.query.filter_by(member_id=registered_member.id).first()
-        assert registered_pass.last_updated > initial_cursor
+        assert registered_pass.last_updated > int(initial_cursor)
 
         changed = client.get(
             f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{registered_pass.pass_type_identifier}?passesUpdatedSince={initial_cursor}"
@@ -432,6 +436,46 @@ def test_apple_wallet_device_polling_cursor_tracks_registered_passes(client, mon
         payload = changed.get_json()
         assert payload["serialNumbers"] == [registered_pass.serial_number]
         assert unrelated_pass.serial_number not in payload["serialNumbers"]
+
+
+def test_apple_wallet_polling_returns_204_when_no_registered_passes_changed(client, monkeypatch):
+    monkeypatch.setenv("APPLE_PASS_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+    with flask_app.app_context():
+        member = create_member()
+        pass_record = AppleWalletPass.create_for_member(member)
+        device = AppleWalletDevice.create_or_update("device-empty", "push-token-empty")
+        AppleWalletRegistration.register(pass_record, device)
+        db.session.commit()
+
+        response = client.get(
+            f"/apple-wallet/v1/devices/{device.device_library_identifier}/registrations/{pass_record.pass_type_identifier}?passesUpdatedSince={pass_record.last_updated}"
+        )
+
+        assert response.status_code == 204
+        assert response.data == b""
+
+
+def test_apple_wallet_log_accepts_sanitized_messages(client, capsys):
+    response = client.post(
+        "/apple-wallet/v1/log",
+        json={
+            "logs": [
+                "poll failed authenticationToken=secret-token pushToken=push-secret "
+                "deviceLibraryIdentifier=device-secret https://example.test/v1/passes/secret"
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    output = capsys.readouterr().out
+    assert "Apple Wallet diagnostic:" in output
+    assert "secret-token" not in output
+    assert "push-secret" not in output
+    assert "device-secret" not in output
+    assert "https://example.test" not in output
+
+    malformed = client.post("/apple-wallet/v1/log", data="not-json", content_type="text/plain")
+    assert malformed.status_code == 200
 
 
 def test_apple_wallet_appointment_commits_before_pass_update_push(client, monkeypatch):
