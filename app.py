@@ -2,6 +2,7 @@ import base64
 import csv
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -739,8 +740,16 @@ def apple_wallet_payload(member):
                 {"key": "vehicle", "label": "Vehicle", "value": vehicle_text},
                 {"key": "expiration_date", "label": "Expiration", "value": member.expiration_date.strftime("%B %d, %Y")},
                 {"key": "member_id", "label": "Member ID", "value": member.member_id},
-                {"key": "schedule_service", "label": "Schedule Service", "value": schedule_url},
-                {"key": "manage_membership", "label": "Manage Membership", "value": public_url},
+                {
+                    "key": "schedule_service",
+                    "label": "Schedule Service",
+                    "attributedValue": f'<a href="{html.escape(schedule_url, quote=True)}">Schedule Service</a>',
+                },
+                {
+                    "key": "manage_membership",
+                    "label": "Manage Membership",
+                    "attributedValue": f'<a href="{html.escape(public_url, quote=True)}">Manage Membership</a>',
+                },
             ],
         },
     }
