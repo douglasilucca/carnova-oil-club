@@ -236,6 +236,14 @@ def test_public_member_card_works_and_uses_safe_fields(client):
     assert b"Monthly Membership" in response.data
     assert b"Service History" in response.data
     assert b"Add to Google Wallet" in response.data
+    assert b"Add to Apple Wallet" in response.data
+    assert b"Add your membership to your Wallet" in response.data
+    assert b"/wallet/add" in response.data
+    assert b"/apple-wallet" in response.data
+    assert b"/static/wallet/add-to-apple-wallet.png" in response.data
+    assert b"/static/wallet/add-to-google-wallet.png" in response.data
+    assert b"developer.apple.com" not in response.data
+    assert b"gstatic.com" not in response.data
 
 
 def test_invalid_public_member_token_returns_404(client):
