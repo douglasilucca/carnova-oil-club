@@ -24,12 +24,33 @@
     </div>
   </article>
 
-  <div class="actions" style="margin:0 0 1rem;">
-    <form method="post" action="{{ url_for('public_member_google_wallet_add', token=member.token) }}" style="display:inline-block;">
-      <button class="button secondary" type="submit">Add to Google Wallet</button>
-    </form>
-    <a class="button secondary" href="{{ url_for('member_apple_wallet', token=member.token) }}">Add to Apple Wallet</a>
+  <section class="wallet-panel" aria-labelledby="wallet-heading" data-wallet-device="unknown">
+    <h2 id="wallet-heading">Add your membership to your Wallet</h2>
+    <p>Keep your Carnova Oil Club membership, oil change balance, and service information with you.</p>
+    <div class="wallet-actions">
+      <a class="wallet-option wallet-apple" href="{{ url_for('member_apple_wallet', token=member.token) }}">
+        <img src="{{ url_for('static', filename='wallet/add-to-apple-wallet.png') }}" alt="Add to Apple Wallet">
+      </a>
+      <form class="wallet-option wallet-google" method="post" action="{{ url_for('public_member_google_wallet_add', token=member.token) }}">
+        <button type="submit">
+          <img src="{{ url_for('static', filename='wallet/add-to-google-wallet.png') }}" alt="Add to Google Wallet">
+        </button>
+      </form>
+    </div>
   </div>
+
+  <script>
+    (function () {
+      var walletPanel = document.querySelector('[data-wallet-device]');
+      if (!walletPanel) return;
+      var userAgent = navigator.userAgent || '';
+      walletPanel.dataset.walletDevice = /Android/i.test(userAgent)
+        ? 'android'
+        : /iPhone|iPad|iPod/i.test(userAgent)
+          ? 'ios'
+          : 'unknown';
+    }());
+  </script>
 
   {% if not has_vehicle %}
   <section class="panel vehicle-gate">
