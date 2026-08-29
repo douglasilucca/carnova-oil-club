@@ -3408,13 +3408,21 @@ def stripe_plan_catalog():
         stripe.api_key = stripe_secret
     catalog = []
     for price_id, plan in STRIPE_PLANS.items():
-        details = {"price_id": price_id, **plan, "price_display": "Price shown at checkout"}
+        details = {
+            "price_id": price_id,
+            **plan,
+            "amount_cents": None,
+            "currency": None,
+            "price_display": "Price shown at checkout",
+        }
         if stripe_secret:
             try:
                 price = stripe.Price.retrieve(price_id)
                 amount = price.get("unit_amount")
                 currency = str(price.get("currency") or "usd").upper()
                 if amount is not None:
+                    details["amount_cents"] = int(amount)
+                    details["currency"] = currency
                     details["price_display"] = f"{currency} {amount / 100:.2f}"
             except stripe.error.StripeError:
                 pass

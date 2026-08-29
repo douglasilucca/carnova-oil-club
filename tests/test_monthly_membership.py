@@ -64,6 +64,39 @@ def test_monthly_plan_defaults_are_correct():
     assert monthly_plan["subscription"] is True
 
 
+def test_member_buy_page_renders_tiktok_plan_events(client, monkeypatch):
+    monkeypatch.setattr(
+        stripe.Price,
+        "retrieve",
+        lambda _price_id: {"unit_amount": 4999, "currency": "usd"},
+    )
+    with flask_app.app_context():
+        member = Member(
+            name="TikTok Test Member",
+            email="tiktok@example.com",
+            member_id="COC-00999",
+            expiration_date=date.today() + timedelta(days=365),
+            remaining_changes=3,
+            total_changes=3,
+            token="tiktok-test-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+
+    response = client.get("/m/tiktok-test-token/buy")
+
+    assert response.status_code == 200
+    assert b"ttq.track('ViewContent'" in response.data
+    assert b"ttq.track('InitiateCheckout'" in response.data
+    assert b'data-tiktok-content-id="price_1Tx6veR1GwRFNmYeUO2goMjz"' in response.data
+    assert b"contents: [{" in response.data
+    assert b'content_id: "price_1Tx6veR1GwRFNmYeUO2goMjz"' in response.data
+    assert b'content_name: "Bronze"' in response.data
+    assert b"content_type: 'product'" in response.data
+    assert b"value: 49.99" in response.data
+    assert b'currency: "USD"' in response.data
+
+
 def test_monthly_membership_defaults_are_set_for_manual_creation():
     defaults = monthly_membership_defaults(date.today())
     assert defaults["plan_name"] == "Monthly Membership"

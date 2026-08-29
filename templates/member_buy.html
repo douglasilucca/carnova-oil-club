@@ -19,7 +19,7 @@
         <h3>{{ plan.price_display }}</h3>
         <h2>{{ plan.changes }} oil changes</h2>
         <p class="muted">Valid for {{ plan.valid_days }} days{% if plan.subscription %} · recurring membership{% endif %}</p>
-        <form method="post" action="{{ url_for('public_member_buy_plan', token=member.token, plan_key=plan.price_id) }}">
+        <form method="post" action="{{ url_for('public_member_buy_plan', token=member.token, plan_key=plan.price_id) }}"{% if plan.amount_cents is not none %} data-tiktok-content-id="{{ plan.price_id }}" data-tiktok-content-name="{{ plan.name }}" data-tiktok-value="{{ plan.amount_cents / 100 }}" data-tiktok-currency="{{ plan.currency }}"{% endif %}>
           <button class="button primary" type="submit">Choose {{ plan.name }}</button>
         </form>
       </article>
@@ -27,4 +27,35 @@
     </div>
   </div>
 </section>
+<script>
+  (function () {
+    if (!window.ttq) return;
+
+    {% for plan in plans if plan.amount_cents is not none %}
+    ttq.track('ViewContent', {
+      contents: [{
+        content_id: {{ plan.price_id|tojson }},
+        content_name: {{ plan.name|tojson }},
+        content_type: 'product'
+      }],
+      value: {{ plan.amount_cents / 100 }},
+      currency: {{ plan.currency|tojson }}
+    });
+    {% endfor %}
+
+    document.querySelectorAll('[data-tiktok-content-id]').forEach(function (form) {
+      form.addEventListener('submit', function () {
+        ttq.track('InitiateCheckout', {
+          contents: [{
+            content_id: form.dataset.tiktokContentId,
+            content_name: form.dataset.tiktokContentName,
+            content_type: 'product'
+          }],
+          value: Number(form.dataset.tiktokValue),
+          currency: form.dataset.tiktokCurrency
+        });
+      });
+    });
+  }());
+</script>
 {% endblock %}
