@@ -3613,6 +3613,86 @@ def send_ga4_purchase_event(checkout_session):
         print("GA4 purchase event error:", error)
 
 
+def tiktok_hash_identifier(value, identifier_type):
+    normalized = str(value or "").strip()
+    if identifier_type == "email":
+        normalized = normalized.lower()
+    elif identifier_type == "phone":
+        digits = re.sub(r"\D", "", normalized)
+        if len(digits) == 10:
+            normalized = f"+1{digits}"
+        elif normalized.startswith("+") and digits:
+            normalized = f"+{digits}"
+        elif normalized.startswith("00") and len(digits) > 2:
+            normalized = f"+{digits[2:]}"
+        else:
+            return ""
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def send_tiktok_purchase_event(checkout_session, member):
+    access_token = os.environ.get("TIKTOK_EVENTS_API_TOKEN", "").strip()
+    pixel_id = os.environ.get("TIKTOK_PIXEL_ID", "").strip()
+    if not access_token or not pixel_id:
+        print("TikTok purchase event skipped: missing TikTok Events API configuration")
+        return
+
+    try:
+        details = checkout_session.get("customer_details") or {}
+        email = details.get("email") or checkout_session.get("customer_email") or member.email
+        phone = details.get("phone") or member.phone
+        user = {}
+        hashed_email = tiktok_hash_identifier(email, "email")
+        hashed_phone = tiktok_hash_identifier(phone, "phone")
+        if hashed_email:
+            user["email"] = hashed_email
+        if hashed_phone:
+            user["phone_number"] = hashed_phone
+
+        checkout_id = str(checkout_session.get("id") or "").strip()
+        if not checkout_id:
+            print("TikTok purchase event skipped: missing Stripe checkout session ID")
+            return
+
+        payload = {
+            "event_source": "web",
+            "event_source_id": pixel_id,
+            "data": [
+                {
+                    "event": "Purchase",
+                    "event_time": int(checkout_session.get("created") or datetime.now().timestamp()),
+                    "event_id": f"stripe_checkout_{checkout_id}",
+                    "user": user,
+                    "page": {"url": resolve_public_base_url() or "https://carnovaoil.com"},
+                    "properties": {
+                        "contents": [
+                            {
+                                "content_id": member.stripe_price_id or "membership",
+                                "content_name": member.plan_name,
+                                "content_type": "product",
+                                "quantity": 1,
+                            }
+                        ],
+                        "value": float(checkout_session.get("amount_total") or 0) / 100.0,
+                        "currency": str(checkout_session.get("currency") or "USD").upper(),
+                    },
+                }
+            ],
+        }
+        req = urllib_request.Request(
+            "https://business-api.tiktok.com/open_api/v1.3/event/track/",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Access-Token": access_token, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib_request.urlopen(req, timeout=5):
+            pass
+    except Exception as error:
+        print("TikTok purchase event error:", type(error).__name__)
+
+
 def process_checkout_completed(obj):
     details = obj.get("customer_details") or {}
     shipping = obj.get("shipping_details") or {}
@@ -3845,12 +3925,14 @@ def stripe_webhook():
     member = None
     wallet_sync_member = None
     ga4_checkout_session = None
+    tiktok_checkout_session = None
 
     try:
         if event_type == "checkout.session.completed":
             member, _was_created = process_checkout_completed(obj)
             wallet_sync_member = member
             ga4_checkout_session = obj
+            tiktok_checkout_session = obj
         elif event_type in {"invoice.payment_succeeded", "invoice.paid"}:
             invoice_member, benefits_reset = process_invoice_payment_succeeded(obj)
             if benefits_reset:
@@ -3879,6 +3961,9 @@ def stripe_webhook():
 
     if ga4_checkout_session:
         send_ga4_purchase_event(ga4_checkout_session)
+
+    if tiktok_checkout_session and member:
+        send_tiktok_purchase_event(tiktok_checkout_session, member)
 
     if wallet_sync_member:
         try:
