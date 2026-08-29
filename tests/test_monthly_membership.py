@@ -1,5 +1,6 @@
 import json
 import os
+import hashlib
 from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
@@ -31,6 +32,7 @@ from app import (
     run_renewal_reminders,
     run_unused_benefit_reminders,
     send_unused_benefit_reminder_email,
+    send_tiktok_purchase_event,
 )
 from app import app as flask_app
 
@@ -95,6 +97,208 @@ def test_member_buy_page_renders_tiktok_plan_events(client, monkeypatch):
     assert b"content_type: 'product'" in response.data
     assert b"value: 49.99" in response.data
     assert b'currency: "USD"' in response.data
+
+
+def test_tiktok_purchase_event_uses_hashed_authoritative_checkout_data(monkeypatch):
+    monkeypatch.setenv("TIKTOK_EVENTS_API_TOKEN", "test-access-token")
+    monkeypatch.setenv("TIKTOK_PIXEL_ID", "test-pixel-id")
+    monkeypatch.setenv("BASE_URL", "https://cards.carnova.test")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request_obj, timeout):
+        captured["url"] = request_obj.full_url
+        captured["headers"] = request_obj.headers
+        captured["payload"] = json.loads(request_obj.data)
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    member = Member(
+        name="TikTok Purchase Member",
+        email="fallback@example.com",
+        phone="555-000-0000",
+        member_id="COC-01000",
+        expiration_date=date.today() + timedelta(days=365),
+        remaining_changes=3,
+        total_changes=3,
+        token="tiktok-purchase-token",
+        stripe_price_id="price_bronze",
+        plan_name="Bronze",
+    )
+    checkout_session = {
+        "id": "cs_tiktok_purchase",
+        "created": 1700000000,
+        "amount_total": 4999,
+        "currency": "usd",
+        "customer_details": {"email": " Buyer@Example.COM ", "phone": "+1 (508) 555-0199"},
+    }
+    monkeypatch.setattr("app.urllib_request.urlopen", fake_urlopen)
+
+    send_tiktok_purchase_event(checkout_session, member)
+
+    event = captured["payload"]["data"][0]
+    assert captured["url"] == "https://business-api.tiktok.com/open_api/v1.3/event/track/"
+    assert captured["headers"]["Access-token"] == "test-access-token"
+    assert captured["headers"]["Content-type"] == "application/json"
+    assert captured["timeout"] == 5
+    assert captured["payload"]["event_source"] == "web"
+    assert captured["payload"]["event_source_id"] == "test-pixel-id"
+    assert event["event"] == "Purchase"
+    assert event["event_time"] == 1700000000
+    assert event["event_id"] == "stripe_checkout_cs_tiktok_purchase"
+    assert event["page"] == {"url": "https://cards.carnova.test"}
+    assert event["user"] == {
+        "email": hashlib.sha256(b"buyer@example.com").hexdigest(),
+        "phone_number": hashlib.sha256(b"+15085550199").hexdigest(),
+    }
+    assert event["properties"] == {
+        "contents": [{
+            "content_id": "price_bronze",
+            "content_name": "Bronze",
+            "content_type": "product",
+            "quantity": 1,
+        }],
+        "value": 49.99,
+        "currency": "USD",
+    }
+
+
+def test_tiktok_purchase_event_skips_without_configuration(monkeypatch):
+    monkeypatch.delenv("TIKTOK_EVENTS_API_TOKEN", raising=False)
+    monkeypatch.delenv("TIKTOK_PIXEL_ID", raising=False)
+    called = []
+    member = Member(
+        name="TikTok Skip Member",
+        email="skip@example.com",
+        member_id="COC-01001",
+        expiration_date=date.today() + timedelta(days=365),
+        remaining_changes=3,
+        total_changes=3,
+        token="tiktok-skip-token",
+    )
+    monkeypatch.setattr("app.urllib_request.urlopen", lambda *_args, **_kwargs: called.append(True))
+
+    send_tiktok_purchase_event({"id": "cs_skip"}, member)
+
+    assert called == []
+
+
+def test_tiktok_purchase_failure_does_not_break_stripe_fulfillment(client, monkeypatch):
+    monkeypatch.setenv("TIKTOK_EVENTS_API_TOKEN", "test-access-token")
+    monkeypatch.setenv("TIKTOK_PIXEL_ID", "test-pixel-id")
+    with flask_app.app_context():
+        member = Member(
+            name="TikTok Failure Buyer",
+            email="tiktok-failure@example.com",
+            member_id="COC-01002",
+            expiration_date=date.today() + timedelta(days=30),
+            remaining_changes=0,
+            total_changes=3,
+            token="tiktok-failure-token",
+            status="completed",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    event = {
+        "id": "evt_tiktok_failure",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs_tiktok_failure",
+            "mode": "payment",
+            "customer": "cus_tiktok_failure",
+            "payment_intent": "pi_tiktok_failure",
+            "customer_details": {"email": "tiktok-failure@example.com"},
+            "amount_total": 2499,
+            "currency": "usd",
+            "metadata": {"member_id": str(member_id)},
+            "shipping_details": {},
+        }},
+    }
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", lambda *_args, **_kwargs: event)
+    monkeypatch.setattr(
+        "app.stripe.checkout.Session.list_line_items",
+        lambda *_args, **_kwargs: {"data": [{"price": {"id": "price_1Tx6veR1GwRFNmYeUO2goMjz"}}]},
+    )
+    monkeypatch.setattr(
+        "app.urllib_request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("TikTok unavailable")),
+    )
+
+    response = client.post("/stripe/webhook", data=b"{}", headers={"Stripe-Signature": "valid"})
+
+    assert response.status_code == 200
+    with flask_app.app_context():
+        assert db.session.get(Member, member_id).remaining_changes == 3
+        assert StripeEvent.query.filter_by(event_id="evt_tiktok_failure").first() is not None
+
+
+def test_duplicate_stripe_webhook_sends_one_stable_tiktok_event_id(client, monkeypatch):
+    monkeypatch.setenv("TIKTOK_EVENTS_API_TOKEN", "test-access-token")
+    monkeypatch.setenv("TIKTOK_PIXEL_ID", "test-pixel-id")
+    with flask_app.app_context():
+        member = Member(
+            name="TikTok Replay Buyer",
+            email="tiktok-replay@example.com",
+            member_id="COC-01003",
+            expiration_date=date.today() + timedelta(days=30),
+            remaining_changes=0,
+            total_changes=3,
+            token="tiktok-replay-token",
+            status="completed",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_id = member.id
+
+    event = {
+        "id": "evt_tiktok_replay",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs_tiktok_replay",
+            "mode": "payment",
+            "customer": "cus_tiktok_replay",
+            "payment_intent": "pi_tiktok_replay",
+            "customer_details": {"email": "tiktok-replay@example.com"},
+            "amount_total": 2499,
+            "currency": "usd",
+            "metadata": {"member_id": str(member_id)},
+            "shipping_details": {},
+        }},
+    }
+    event_ids = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request_obj, timeout):
+        event_ids.append(json.loads(request_obj.data)["data"][0]["event_id"])
+        return FakeResponse()
+
+    monkeypatch.setattr("app.stripe.Webhook.construct_event", lambda *_args, **_kwargs: event)
+    monkeypatch.setattr(
+        "app.stripe.checkout.Session.list_line_items",
+        lambda *_args, **_kwargs: {"data": [{"price": {"id": "price_1Tx6veR1GwRFNmYeUO2goMjz"}}]},
+    )
+    monkeypatch.setattr("app.urllib_request.urlopen", fake_urlopen)
+
+    first = client.post("/stripe/webhook", data=b"{}", headers={"Stripe-Signature": "valid"})
+    second = client.post("/stripe/webhook", data=b"{}", headers={"Stripe-Signature": "valid"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert event_ids == ["stripe_checkout_cs_tiktok_replay"]
 
 
 def test_monthly_membership_defaults_are_set_for_manual_creation():
