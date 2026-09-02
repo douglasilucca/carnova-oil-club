@@ -84,6 +84,10 @@ class SalesRep(db.Model):
     active = db.Column(db.Boolean, nullable=False, default=True)
     phone = db.Column(db.String(50), default="")
     email = db.Column(db.String(255), default="")
+    login_email = db.Column(db.String(255), unique=True, index=True)
+    password_hash = db.Column(db.String(255))
+    last_login_at = db.Column(db.DateTime)
+    portal_enabled = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 
@@ -404,6 +408,18 @@ def add_missing_columns():
                     f"ALTER TABLE member ADD COLUMN {column_name} {definition}"
                 )
 
+    if "sales_rep" in tables:
+        sales_rep_columns = {column["name"] for column in inspector.get_columns("sales_rep")}
+        sales_rep_column_definitions = {
+            "login_email": "VARCHAR(255)",
+            "password_hash": "VARCHAR(255)",
+            "last_login_at": "DATETIME",
+            "portal_enabled": "BOOLEAN DEFAULT 0 NOT NULL",
+        }
+        for column_name, definition in sales_rep_column_definitions.items():
+            if column_name not in sales_rep_columns:
+                statements.append(f"ALTER TABLE sales_rep ADD COLUMN {column_name} {definition}")
+
     if "redemption" not in tables:
         for statement in statements:
             try:
@@ -462,6 +478,19 @@ def login_required(view):
     return wrapped
 
 
+def sales_rep_login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        rep_id = session.get("sales_rep_id")
+        rep = db.session.get(SalesRep, rep_id) if str(rep_id or "").isdigit() else None
+        if not rep or not rep.active or not rep.portal_enabled:
+            session.pop("sales_rep_id", None)
+            return redirect(url_for("sales_login"))
+        return view(rep, *args, **kwargs)
+
+    return wrapped
+
+
 REFERRAL_ATTRIBUTION_KEY = "sales_rep_referral"
 REFERRAL_ATTRIBUTION_DAYS = 30
 
@@ -500,6 +529,54 @@ def sales_rep_referral(slug):
     return redirect(url_for("new_customer_purchase"))
 
 
+@app.route("/sales/login", methods=["GET", "POST"])
+def sales_login():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        rep = SalesRep.query.filter(db.func.lower(SalesRep.login_email) == email).first()
+        if rep and rep.active and rep.portal_enabled and rep.password_hash and check_password_hash(rep.password_hash, password):
+            session.pop("admin_id", None)
+            session["sales_rep_id"] = rep.id
+            rep.last_login_at = datetime.utcnow()
+            db.session.commit()
+            return redirect(url_for("sales_dashboard"))
+        flash("Invalid salesperson login.", "error")
+    return render_template("sales_login.html")
+
+
+@app.route("/sales/logout", methods=["POST"])
+def sales_logout():
+    session.pop("sales_rep_id", None)
+    return redirect(url_for("sales_login"))
+
+
+@app.route("/sales/dashboard")
+@sales_rep_login_required
+def sales_dashboard(rep):
+    sales = ReferralSale.query.filter_by(sales_rep_id=rep.id).order_by(ReferralSale.created_at.desc()).all()
+    today = date.today()
+    month_start = date(today.year, today.month, 1)
+    month_sales = [sale for sale in sales if sale.created_at.date() >= month_start]
+    pending = sum(sale.commission_cents or 0 for sale in sales if sale.commission_status == "pending")
+    paid = sum(sale.commission_cents or 0 for sale in sales if sale.commission_status == "paid")
+    counts = {changes: sum(sale.oil_changes == changes for sale in sales) for changes in (3, 5, 8)}
+    return render_template(
+        "sales_dashboard.html",
+        rep=rep,
+        sales=sales,
+        stats={
+            "today": sum(sale.created_at.date() == today for sale in sales),
+            "month": len(month_sales),
+            "total": len(sales),
+            "pending": pending,
+            "paid": paid,
+            "earned": pending + paid,
+            "counts": counts,
+        },
+    )
+
+
 @app.route("/admin/sales-reps", methods=["GET", "POST"])
 @login_required
 def sales_reps():
@@ -511,7 +588,20 @@ def sales_reps():
         elif SalesRep.query.filter_by(slug=slug).first():
             flash("That referral slug is already in use.", "error")
         else:
-            db.session.add(SalesRep(name=name, slug=slug, phone=request.form.get("phone", "").strip(), email=request.form.get("email", "").strip().lower()))
+            login_email = request.form.get("login_email", "").strip().lower() or None
+            login_password = request.form.get("login_password", "")
+            if login_email and SalesRep.query.filter_by(login_email=login_email).first():
+                flash("That portal email is already in use.", "error")
+                return redirect(url_for("sales_reps"))
+            db.session.add(SalesRep(
+                name=name,
+                slug=slug,
+                phone=request.form.get("phone", "").strip(),
+                email=request.form.get("email", "").strip().lower(),
+                login_email=login_email,
+                password_hash=generate_password_hash(login_password) if login_password else None,
+                portal_enabled=bool(login_email and login_password),
+            ))
             db.session.commit()
             flash("Sales rep created.", "success")
             return redirect(url_for("sales_reps"))
@@ -545,6 +635,27 @@ def toggle_sales_rep(rep_id):
     rep.active = not rep.active
     db.session.commit()
     return redirect(url_for("sales_reps"))
+
+
+@app.route("/admin/sales-reps/<int:rep_id>/portal-credentials", methods=["POST"])
+@login_required
+def update_sales_rep_portal_credentials(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    login_email = request.form.get("login_email", "").strip().lower() or None
+    login_password = request.form.get("login_password", "")
+    duplicate = SalesRep.query.filter(SalesRep.login_email == login_email, SalesRep.id != rep.id).first() if login_email else None
+    if login_password and len(login_password) < 8:
+        flash("Portal passwords must be at least 8 characters.", "error")
+    elif duplicate:
+        flash("That portal email is already in use.", "error")
+    else:
+        rep.login_email = login_email
+        if login_password:
+            rep.password_hash = generate_password_hash(login_password)
+        rep.portal_enabled = bool(request.form.get("portal_enabled")) and bool(rep.login_email and rep.password_hash)
+        db.session.commit()
+        flash("Sales rep portal access updated.", "success")
+    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
 
 
 @app.route("/admin/referral-sales/<int:sale_id>/paid", methods=["POST"])
