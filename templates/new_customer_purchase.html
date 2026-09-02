@@ -1,30 +1,54 @@
 {% extends "base.html" %}
-{% block title %}Join Carnova Oil Club{% endblock %}
+{% block title %}Join the Carnova Oil Club{% endblock %}
 {% block content %}
-<section class="public-wrap">
-  <div class="page-heading"><div><p class="eyebrow gold">CARNOVA OIL CLUB</p><h1>Join the Oil Club</h1><p class="muted">Choose your package and enter your membership details.</p>{% if sales_rep %}<p class="muted">Assisted by {{ sales_rep.name }}</p>{% endif %}</div></div>
-  <section class="panel">
-    <form class="stack" id="purchase-form" method="post">
-      <div class="form-grid">
-        <label>Full name<input name="name" required autocomplete="name"></label>
-        <label>Mobile phone<input name="phone" required autocomplete="tel"></label>
+<section class="purchase-page">
+  <header class="purchase-hero">
+    <p class="eyebrow gold">CARNOVA OIL CLUB</p>
+    <h1>JOIN THE CARNOVA OIL CLUB</h1>
+    <h2>Save More. Drive More.</h2>
+    <p>Choose your prepaid synthetic oil change package and keep your maintenance simple.</p>
+    {% if sales_rep %}<p class="purchase-specialist">Your Carnova Oil Club Specialist: <strong>{{ sales_rep.name }}</strong></p>{% endif %}
+  </header>
+
+  <form class="purchase-form" id="purchase-form" method="post" action="{{ url_for('create_new_customer_checkout', plan_key='price_1Tx6veR1GwRFNmYeUO2goMjz') }}">
+    <section class="purchase-section panel">
+      <div class="section-intro"><p class="eyebrow">YOUR DETAILS</p><h2>Start with the basics</h2><p class="muted">We use this information to prepare your membership.</p></div>
+      <div class="form-grid purchase-fields">
+        <label>Full Name<input name="name" required autocomplete="name"></label>
+        <label>Mobile Phone<input name="phone" required autocomplete="tel"></label>
         <label>Email<input name="email" type="email" required autocomplete="email"></label>
-        <label>Vehicle year<input name="vehicle_year" required inputmode="numeric" pattern="[0-9]{4}" maxlength="4"></label>
-        <label>Vehicle make<input name="vehicle_make" required></label>
-        <label>Vehicle model<input name="vehicle_model" required></label>
       </div>
-      <h2>Choose a package</h2>
-      <div class="plans-grid">
+    </section>
+
+    <section class="purchase-section package-section">
+      <div class="section-intro"><p class="eyebrow">CHOOSE YOUR PACKAGE</p><h2>One purchase. Multiple oil changes. Less to worry about.</h2></div>
+      <div class="package-grid">
       {% for plan in plans if not plan.subscription %}
-        <button class="panel plan-card purchase-plan" type="submit" data-action="{{ url_for('create_new_customer_checkout', plan_key=plan.price_id) }}"><span class="eyebrow">{{ plan.name }}</span><strong>{{ plan.changes }} oil changes</strong><span class="muted">{{ plan.price_display }}</span></button>
+        {% set package_price = {'Bronze': '$149', 'Silver': '$229', 'Gold': '$329'}.get(plan.name, plan.price_display) %}
+        {% set per_change = {'Bronze': '$49.67', 'Silver': '$45.80', 'Gold': '$41.13'}.get(plan.name, '') %}
+        <button class="package-card{% if plan.name == 'Silver' %} featured{% endif %}" type="submit" formaction="{{ url_for('create_new_customer_checkout', plan_key=plan.price_id) }}" data-package="{{ plan.name }}">
+          {% if plan.name == 'Silver' %}<span class="package-badge">MOST POPULAR</span>{% elif plan.name == 'Gold' %}<span class="package-badge value">BEST VALUE</span>{% endif %}
+          <span class="package-name">{{ plan.name|upper }}</span>
+          <strong class="package-price">{{ package_price }}</strong>
+          <span class="package-changes">{{ plan.changes }} Synthetic Oil Changes</span>
+          <span class="package-rate">Only {{ per_change }} per oil change</span>
+          <span class="package-action">CONTINUE TO SECURE CHECKOUT <span aria-hidden="true">→</span></span>
+        </button>
       {% endfor %}
       </div>
-    </form>
+      <p class="secure-note">Secure payment powered by Stripe</p>
+    </section>
+  </form>
+
+  <section class="purchase-section benefits-section">
+    <div><p class="eyebrow gold">MEMBERSHIP MADE SIMPLE</p><h2>Built for the way you maintain your vehicle.</h2></div>
+    <ul class="benefits-list">
+      <li>Full synthetic oil</li>
+      <li>Prepaid maintenance</li>
+      <li>Easy online scheduling</li>
+      <li>Digital membership</li>
+      <li>Apple Wallet &amp; Google Wallet</li>
+    </ul>
   </section>
 </section>
-<script>
-  document.querySelectorAll('.purchase-plan').forEach(function (button) {
-    button.addEventListener('click', function () { document.getElementById('purchase-form').action = button.dataset.action; });
-  });
-</script>
 {% endblock %}
