@@ -114,9 +114,9 @@ class PendingCheckout(db.Model):
     name = db.Column(db.String(255), nullable=False)
     phone = db.Column(db.String(50), nullable=False)
     email = db.Column(db.String(255), nullable=False, index=True)
-    vehicle_year = db.Column(db.String(4), nullable=False)
-    vehicle_make = db.Column(db.String(100), nullable=False)
-    vehicle_model = db.Column(db.String(100), nullable=False)
+    vehicle_year = db.Column(db.String(4), nullable=False, default="")
+    vehicle_make = db.Column(db.String(100), nullable=False, default="")
+    vehicle_model = db.Column(db.String(100), nullable=False, default="")
     stripe_price_id = db.Column(db.String(255), nullable=False)
     stripe_checkout_session_id = db.Column(db.String(255), unique=True, index=True)
     status = db.Column(db.String(20), nullable=False, default="pending")
@@ -2136,11 +2136,8 @@ def create_new_customer_checkout(plan_key):
     name = request.form.get("name", "").strip()
     phone = request.form.get("phone", "").strip()
     email = request.form.get("email", "").strip().lower()
-    vehicle_year = request.form.get("vehicle_year", "").strip()
-    vehicle_make = request.form.get("vehicle_make", "").strip()
-    vehicle_model = request.form.get("vehicle_model", "").strip()
-    if not name or not phone or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email) or not re.fullmatch(r"\d{4}", vehicle_year) or not vehicle_make or not vehicle_model:
-        flash("Please provide valid contact and vehicle information.", "error")
+    if not name or not phone or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        flash("Please provide valid contact information.", "error")
         return redirect(url_for("new_customer_purchase"))
 
     sales_rep = current_referral_rep()
@@ -2150,9 +2147,6 @@ def create_new_customer_checkout(plan_key):
         name=name,
         phone=phone,
         email=email,
-        vehicle_year=vehicle_year,
-        vehicle_make=vehicle_make,
-        vehicle_model=vehicle_model,
         stripe_price_id=plan_key,
     )
     db.session.add(pending)
@@ -4097,13 +4091,6 @@ def process_checkout_completed(obj, event_id=None):
         pending.member_id = member.id
         pending.status = "fulfilled"
         pending.fulfilled_at = datetime.utcnow()
-        if not Vehicle.query.filter_by(member_id=member.id).first():
-            db.session.add(Vehicle(
-                member_id=member.id,
-                year=pending.vehicle_year,
-                make=pending.vehicle_make,
-                model=pending.vehicle_model,
-            ))
     create_referral_sale(event_id, obj, member, price_id, selected_plan)
     return member, True
 

@@ -46,8 +46,38 @@ def test_referral_lands_on_new_customer_sales_page(client):
         db.session.commit()
     response = client.get("/r/diego", follow_redirects=True)
     assert response.status_code == 200
-    assert b"Join the Oil Club" in response.data
-    assert b"Assisted by Diego" in response.data
+    assert b"JOIN THE CARNOVA OIL CLUB" in response.data
+    assert b"Your Carnova Oil Club Specialist: <strong>Diego</strong>" in response.data
+
+
+def test_purchase_page_uses_rep_name_and_polished_package_copy(client, monkeypatch):
+    with flask_app.app_context():
+        db.session.add(SalesRep(name="Douglas Test", slug="douglas-test"))
+        db.session.commit()
+    monkeypatch.setattr("app.stripe_plan_catalog", lambda: [
+        {"name": "Bronze", "changes": 3, "price_id": "price_1Tx6veR1GwRFNmYeUO2goMjz", "price_display": "USD 149.00", "subscription": False},
+        {"name": "Silver", "changes": 5, "price_id": "price_1TwiJER1GwRFNmYeeFbUdscR", "price_display": "USD 229.00", "subscription": False},
+        {"name": "Gold", "changes": 8, "price_id": "price_1Tx70UR1GwRFNmYePYn1Xrdz", "price_display": "USD 329.00", "subscription": False},
+    ])
+    response = client.get("/r/douglas-test", follow_redirects=True)
+    assert response.status_code == 200
+    assert b"Your Carnova Oil Club Specialist: <strong>Douglas Test</strong>" in response.data
+    assert b"douglas-test" not in response.data
+    assert b"BRONZE" in response.data and b"3 Synthetic Oil Changes" in response.data
+    assert b"$149" in response.data and b"Only $49.67 per oil change" in response.data
+    assert b"SILVER" in response.data and b"5 Synthetic Oil Changes" in response.data
+    assert b"$229" in response.data and b"Only $45.80 per oil change" in response.data
+    assert b"MOST POPULAR" in response.data
+    assert b"GOLD" in response.data and b"8 Synthetic Oil Changes" in response.data
+    assert b"$329" in response.data and b"Only $41.13 per oil change" in response.data
+    assert b"BEST VALUE" in response.data
+    for field in (b'name="name"', b'name="phone"', b'name="email"'):
+        assert field in response.data
+    for field in (b'name="vehicle_year"', b'name="vehicle_make"', b'name="vehicle_model"'):
+        assert field not in response.data
+    assert b"/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz" in response.data
+    assert b"/purchase/price_1TwiJER1GwRFNmYeeFbUdscR" in response.data
+    assert b"/purchase/price_1Tx70UR1GwRFNmYePYn1Xrdz" in response.data
 
 
 def test_latest_valid_referral_wins(client):
@@ -98,12 +128,14 @@ def test_new_customer_checkout_stores_validated_data_and_opaque_metadata(client,
         id = "cs-new"
         url = "https://checkout.test/new"
     monkeypatch.setattr(stripe.checkout.Session, "create", lambda **kwargs: captured.setdefault("kwargs", kwargs) and Checkout())
-    response = client.post("/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz", data={"name": "New Buyer", "phone": "555-0100", "email": "new@example.com", "vehicle_year": "2022", "vehicle_make": "Honda", "vehicle_model": "Civic", "plan_key": "attacker", "sales_rep_id": "999"})
+    response = client.post("/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz", data={"name": "New Buyer", "phone": "555-0100", "email": "new@example.com", "plan_key": "attacker", "sales_rep_id": "999"})
     assert response.status_code == 302
     with flask_app.app_context():
         pending = PendingCheckout.query.one()
         assert pending.email == "new@example.com"
-        assert pending.vehicle_make == "Honda"
+        assert pending.vehicle_year == ""
+        assert pending.vehicle_make == ""
+        assert pending.vehicle_model == ""
         assert pending.stripe_price_id == "price_1Tx6veR1GwRFNmYeUO2goMjz"
         assert captured["kwargs"]["metadata"] == {"pending_checkout_token": pending.public_token, "sales_rep_id": "1"}
 
@@ -114,7 +146,7 @@ def test_abandoned_new_customer_checkout_does_not_leave_pending_record(client, m
         db.session.commit()
     client.get("/r/diego")
     monkeypatch.setattr(stripe.checkout.Session, "create", lambda **kwargs: (_ for _ in ()).throw(stripe.error.InvalidRequestError("cancelled", "request")))
-    response = client.post("/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz", data={"name": "New Buyer", "phone": "555-0100", "email": "new@example.com", "vehicle_year": "2022", "vehicle_make": "Honda", "vehicle_model": "Civic"})
+    response = client.post("/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz", data={"name": "New Buyer", "phone": "555-0100", "email": "new@example.com"})
     assert response.status_code == 302
     with flask_app.app_context():
         assert PendingCheckout.query.count() == 0
@@ -126,7 +158,7 @@ def test_new_customer_webhook_creates_member_vehicle_and_referral_sale(client, m
         rep = SalesRep(name="Diego", slug="diego")
         db.session.add(rep)
         db.session.flush()
-        pending = PendingCheckout(public_token=f"pending-{changes}", sales_rep_id=rep.id, name="New Buyer", phone="555-0100", email="new@example.com", vehicle_year="2022", vehicle_make="Honda", vehicle_model="Civic", stripe_price_id=price_id, stripe_checkout_session_id=f"cs-new-{changes}")
+        pending = PendingCheckout(public_token=f"pending-{changes}", sales_rep_id=rep.id, name="New Buyer", phone="555-0100", email="new@example.com", stripe_price_id=price_id, stripe_checkout_session_id=f"cs-new-{changes}")
         db.session.add(pending)
         db.session.commit()
         pending_token = pending.public_token
@@ -139,7 +171,7 @@ def test_new_customer_webhook_creates_member_vehicle_and_referral_sale(client, m
         sale = ReferralSale.query.one()
         pending = PendingCheckout.query.filter_by(public_token=pending_token).one()
         assert member.total_changes == changes
-        assert Vehicle.query.filter_by(member_id=member.id).one().display_name == "2022 Honda Civic"
+        assert Vehicle.query.filter_by(member_id=member.id).count() == 0
         assert sale.member_id == member.id
         assert sale.sales_rep_id == 1
         assert sale.commission_cents == commission
