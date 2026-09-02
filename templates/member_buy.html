@@ -7,6 +7,7 @@
       <p class="eyebrow gold">CARNOVA OIL CLUB</p>
       <h1>Buy More Oil Changes</h1>
       <p class="muted">{{ member.name }} · {{ member.member_id }}</p>
+      {% if sales_rep %}<p class="muted">Assisted by {{ sales_rep.name }}</p>{% endif %}
     </div>
   </div>
 

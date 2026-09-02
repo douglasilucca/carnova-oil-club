@@ -77,6 +77,56 @@ class Member(db.Model):
     )
 
 
+class SalesRep(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    slug = db.Column(db.String(80), unique=True, nullable=False, index=True)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    phone = db.Column(db.String(50), default="")
+    email = db.Column(db.String(255), default="")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
+class ReferralSale(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sales_rep_id = db.Column(db.Integer, db.ForeignKey("sales_rep.id"), nullable=False, index=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False, index=True)
+    stripe_event_id = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    stripe_checkout_session_id = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    stripe_price_id = db.Column(db.String(255), nullable=False)
+    plan_name = db.Column(db.String(100), nullable=False)
+    oil_changes = db.Column(db.Integer, nullable=False)
+    sale_amount_cents = db.Column(db.Integer, nullable=False, default=0)
+    commission_cents = db.Column(db.Integer, nullable=False, default=0)
+    commission_status = db.Column(db.String(20), nullable=False, default="pending")
+    paid_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    sales_rep = db.relationship("SalesRep", backref=db.backref("referral_sales", lazy=True))
+    member = db.relationship("Member", backref=db.backref("referral_sales", lazy=True))
+
+
+class PendingCheckout(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    public_token = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    sales_rep_id = db.Column(db.Integer, db.ForeignKey("sales_rep.id"), nullable=True, index=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=True, index=True)
+    name = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(50), nullable=False)
+    email = db.Column(db.String(255), nullable=False, index=True)
+    vehicle_year = db.Column(db.String(4), nullable=False)
+    vehicle_make = db.Column(db.String(100), nullable=False)
+    vehicle_model = db.Column(db.String(100), nullable=False)
+    stripe_price_id = db.Column(db.String(255), nullable=False)
+    stripe_checkout_session_id = db.Column(db.String(255), unique=True, index=True)
+    status = db.Column(db.String(20), nullable=False, default="pending")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    fulfilled_at = db.Column(db.DateTime)
+
+    sales_rep = db.relationship("SalesRep", backref=db.backref("pending_checkouts", lazy=True))
+    member = db.relationship("Member", backref=db.backref("pending_checkouts", lazy=True))
+
+
 
 class AppleWalletPass(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -410,6 +460,101 @@ def login_required(view):
         return view(*args, **kwargs)
 
     return wrapped
+
+
+REFERRAL_ATTRIBUTION_KEY = "sales_rep_referral"
+REFERRAL_ATTRIBUTION_DAYS = 30
+
+
+def referral_slug(value):
+    value = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
+    return value[:80]
+
+
+def current_referral_rep():
+    attribution = session.get(REFERRAL_ATTRIBUTION_KEY) or {}
+    captured_at = attribution.get("captured_at")
+    rep_id = attribution.get("sales_rep_id")
+    if not isinstance(captured_at, (int, float)) or not str(rep_id).isdigit():
+        session.pop(REFERRAL_ATTRIBUTION_KEY, None)
+        return None
+    if datetime.utcnow().timestamp() - captured_at > REFERRAL_ATTRIBUTION_DAYS * 86400:
+        session.pop(REFERRAL_ATTRIBUTION_KEY, None)
+        return None
+    rep = db.session.get(SalesRep, int(rep_id))
+    if not rep or not rep.active:
+        session.pop(REFERRAL_ATTRIBUTION_KEY, None)
+        return None
+    return rep
+
+
+@app.route("/r/<slug>")
+def sales_rep_referral(slug):
+    rep = SalesRep.query.filter_by(slug=slug.lower()).first()
+    if not rep or not rep.active:
+        return "Referral link not found", 404
+    session[REFERRAL_ATTRIBUTION_KEY] = {
+        "sales_rep_id": rep.id,
+        "captured_at": datetime.utcnow().timestamp(),
+    }
+    return redirect(url_for("new_customer_purchase"))
+
+
+@app.route("/admin/sales-reps", methods=["GET", "POST"])
+@login_required
+def sales_reps():
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        slug = referral_slug(request.form.get("slug") or name)
+        if not name or not slug:
+            flash("A sales rep name is required.", "error")
+        elif SalesRep.query.filter_by(slug=slug).first():
+            flash("That referral slug is already in use.", "error")
+        else:
+            db.session.add(SalesRep(name=name, slug=slug, phone=request.form.get("phone", "").strip(), email=request.form.get("email", "").strip().lower()))
+            db.session.commit()
+            flash("Sales rep created.", "success")
+            return redirect(url_for("sales_reps"))
+    reps = SalesRep.query.order_by(SalesRep.name.asc()).all()
+    summaries = []
+    for rep in reps:
+        sales = rep.referral_sales
+        summaries.append({
+            "rep": rep,
+            "sales": sales,
+            "total_sales": len(sales),
+            "package_counts": {changes: sum(s.oil_changes == changes for s in sales) for changes in (3, 5, 8)},
+            "total_revenue": sum(s.sale_amount_cents or 0 for s in sales),
+            "pending": sum(s.commission_cents or 0 for s in sales if s.commission_status == "pending"),
+            "paid": sum(s.commission_cents or 0 for s in sales if s.commission_status == "paid"),
+        })
+    return render_template("sales_reps.html", summaries=summaries)
+
+
+@app.route("/admin/sales-reps/<int:rep_id>")
+@login_required
+def sales_rep_detail(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    return render_template("sales_rep_detail.html", rep=rep, sales=ReferralSale.query.filter_by(sales_rep_id=rep.id).order_by(ReferralSale.created_at.desc()).all())
+
+
+@app.route("/admin/sales-reps/<int:rep_id>/toggle", methods=["POST"])
+@login_required
+def toggle_sales_rep(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    rep.active = not rep.active
+    db.session.commit()
+    return redirect(url_for("sales_reps"))
+
+
+@app.route("/admin/referral-sales/<int:sale_id>/paid", methods=["POST"])
+@login_required
+def mark_referral_sale_paid(sale_id):
+    sale = db.get_or_404(ReferralSale, sale_id)
+    sale.commission_status = "paid"
+    sale.paid_at = sale.paid_at or datetime.utcnow()
+    db.session.commit()
+    return redirect(url_for("sales_rep_detail", rep_id=sale.sales_rep_id))
 
 
 @app.route("/admin/reset-test-data", methods=["GET", "POST"])
@@ -1969,7 +2114,83 @@ def public_member_billing_portal(token):
 @app.route("/m/<token>/buy")
 def public_member_buy(token):
     member = Member.query.filter_by(token=token).first_or_404()
-    return render_template("member_buy.html", member=member, plans=stripe_plan_catalog())
+    return render_template(
+        "member_buy.html",
+        member=member,
+        plans=stripe_plan_catalog(),
+        sales_rep=current_referral_rep(),
+    )
+
+
+@app.route("/purchase")
+def new_customer_purchase():
+    return render_template("new_customer_purchase.html", sales_rep=current_referral_rep(), plans=stripe_plan_catalog())
+
+
+@app.route("/purchase/<path:plan_key>", methods=["POST"])
+def create_new_customer_checkout(plan_key):
+    plan = STRIPE_PLANS.get(plan_key)
+    if not plan or plan["subscription"]:
+        return {"error": "plan_not_found"}, 404
+
+    name = request.form.get("name", "").strip()
+    phone = request.form.get("phone", "").strip()
+    email = request.form.get("email", "").strip().lower()
+    vehicle_year = request.form.get("vehicle_year", "").strip()
+    vehicle_make = request.form.get("vehicle_make", "").strip()
+    vehicle_model = request.form.get("vehicle_model", "").strip()
+    if not name or not phone or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email) or not re.fullmatch(r"\d{4}", vehicle_year) or not vehicle_make or not vehicle_model:
+        flash("Please provide valid contact and vehicle information.", "error")
+        return redirect(url_for("new_customer_purchase"))
+
+    sales_rep = current_referral_rep()
+    pending = PendingCheckout(
+        public_token=secrets.token_urlsafe(32),
+        sales_rep_id=sales_rep.id if sales_rep else None,
+        name=name,
+        phone=phone,
+        email=email,
+        vehicle_year=vehicle_year,
+        vehicle_make=vehicle_make,
+        vehicle_model=vehicle_model,
+        stripe_price_id=plan_key,
+    )
+    db.session.add(pending)
+    db.session.flush()
+    stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+    if not stripe_secret:
+        db.session.rollback()
+        flash("Purchases are temporarily unavailable. Please try again later.", "error")
+        return redirect(url_for("new_customer_purchase"))
+
+    stripe.api_key = stripe_secret
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            mode="payment",
+            line_items=[{"price": plan_key, "quantity": 1}],
+            success_url=f"{resolve_public_base_url()}{url_for('new_customer_purchase_success', public_token=pending.public_token)}",
+            cancel_url=f"{resolve_public_base_url()}{url_for('new_customer_purchase', _external=False)}",
+            customer_email=email,
+            metadata={"pending_checkout_token": pending.public_token, **({"sales_rep_id": str(sales_rep.id)} if sales_rep else {})},
+        )
+        pending.stripe_checkout_session_id = checkout_session.id
+        db.session.commit()
+    except stripe.error.StripeError as error:
+        db.session.rollback()
+        print("Stripe new customer checkout creation error:", error)
+        flash("We couldn't open checkout right now. Please try again later.", "error")
+        return redirect(url_for("new_customer_purchase"))
+    return redirect(checkout_session.url)
+
+
+@app.route("/purchase/success/<public_token>")
+def new_customer_purchase_success(public_token):
+    pending = PendingCheckout.query.filter_by(public_token=public_token).first_or_404()
+    if pending.member_id:
+        member = db.session.get(Member, pending.member_id)
+        if member:
+            return redirect(url_for("member_public", token=member.token))
+    return render_template("purchase_pending.html", pending=pending)
 
 
 @app.route("/m/<token>/buy/<path:plan_key>", methods=["POST"])
@@ -1986,6 +2207,10 @@ def public_member_buy_plan(token, plan_key):
 
     stripe.api_key = stripe_secret
     mode = "subscription" if plan["subscription"] else "payment"
+    sales_rep = current_referral_rep()
+    metadata = {"member_id": str(member.id), "plan_price_id": plan_key}
+    if sales_rep:
+        metadata["sales_rep_id"] = str(sales_rep.id)
     try:
         checkout_session = stripe.checkout.Session.create(
             mode=mode,
@@ -1993,7 +2218,7 @@ def public_member_buy_plan(token, plan_key):
             success_url=f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}",
             cancel_url=f"{resolve_public_base_url()}{url_for('public_member_buy', token=member.token)}",
             customer_email=member.email,
-            metadata={"member_id": str(member.id), "plan_price_id": plan_key},
+            metadata=metadata,
         )
     except stripe.error.StripeError as error:
         print("Stripe checkout creation error:", error)
@@ -3401,6 +3626,39 @@ STRIPE_PLANS = {
     },
 }
 
+COMMISSION_CENTS_BY_CHANGES = {3: 1000, 5: 1500, 8: 2000}
+
+
+def create_referral_sale(event_id, checkout_session, member, price_id, selected_plan):
+    metadata = checkout_session.get("metadata") or {}
+    sales_rep_id = metadata.get("sales_rep_id")
+    if not member or not str(sales_rep_id or "").isdigit():
+        return None
+    sales_rep = db.session.get(SalesRep, int(sales_rep_id))
+    if not sales_rep:
+        return None
+    if ReferralSale.query.filter(
+        db.or_(
+            ReferralSale.stripe_event_id == event_id,
+            ReferralSale.stripe_checkout_session_id == checkout_session.get("id"),
+        )
+    ).first():
+        return None
+    sale = ReferralSale(
+        sales_rep_id=sales_rep.id,
+        member_id=member.id,
+        stripe_event_id=event_id,
+        stripe_checkout_session_id=checkout_session.get("id"),
+        stripe_price_id=price_id,
+        plan_name=selected_plan["name"],
+        oil_changes=selected_plan["changes"],
+        sale_amount_cents=int(checkout_session.get("amount_total") or 0),
+        commission_cents=0 if selected_plan["subscription"] else COMMISSION_CENTS_BY_CHANGES.get(selected_plan["changes"], 0),
+        commission_status="pending",
+    )
+    db.session.add(sale)
+    return sale
+
 
 def stripe_plan_catalog():
     stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
@@ -3693,19 +3951,25 @@ def send_tiktok_purchase_event(checkout_session, member):
         print("TikTok purchase event error:", type(error).__name__)
 
 
-def process_checkout_completed(obj):
+def process_checkout_completed(obj, event_id=None):
     details = obj.get("customer_details") or {}
     shipping = obj.get("shipping_details") or {}
     metadata = obj.get("metadata") or {}
+    pending_token = metadata.get("pending_checkout_token")
+    pending = PendingCheckout.query.filter_by(public_token=pending_token).first() if pending_token else None
+    if pending:
+        metadata = {**metadata, "sales_rep_id": str(pending.sales_rep_id or "")}
+        obj["metadata"] = metadata
 
-    email = details.get("email") or obj.get("customer_email")
+    email = details.get("email") or obj.get("customer_email") or (pending.email if pending else None)
     customer_name = (
         details.get("name")
         or shipping.get("name")
+        or (pending.name if pending else None)
         or metadata.get("customer_name")
         or obj.get("customer_name")
     )
-    customer_phone = details.get("phone") or shipping.get("phone") or ""
+    customer_phone = details.get("phone") or shipping.get("phone") or (pending.phone if pending else "")
     customer_id = stripe_object_id(obj.get("customer"))
     subscription_id = stripe_object_id(obj.get("subscription"))
     payment_id = stripe_object_id(obj.get("payment_intent")) or obj.get("id")
@@ -3751,6 +4015,10 @@ def process_checkout_completed(obj):
     if not selected_plan:
         print("Ignoring Stripe checkout session for unsupported price:", price_id)
         return None, False
+    if pending and pending.stripe_checkout_session_id != obj.get("id"):
+        raise ValueError("Stripe checkout session does not match pending checkout")
+    if pending and pending.stripe_price_id != price_id:
+        raise ValueError("Stripe price does not match pending checkout")
     if not email:
         raise ValueError("Stripe checkout did not include a customer email")
 
@@ -3759,7 +4027,7 @@ def process_checkout_completed(obj):
     subscription_status = "active" if selected_plan["subscription"] else None
 
     # Webhook retries and duplicate checkout events must not create duplicate members.
-    member_id = metadata.get("member_id")
+    member_id = metadata.get("member_id") or (pending.member_id if pending else None)
     existing = Member.query.get(int(member_id)) if str(member_id or "").isdigit() else None
     existing = existing or find_subscription_member(
         subscription_id=subscription_id,
@@ -3787,6 +4055,11 @@ def process_checkout_completed(obj):
         existing.price_paid_cents = int(obj.get("amount_total") or existing.price_paid_cents or 0)
         existing.status = current_member_status(existing)
         db.session.flush()
+        if pending:
+            pending.member_id = existing.id
+            pending.status = "fulfilled"
+            pending.fulfilled_at = pending.fulfilled_at or datetime.utcnow()
+        create_referral_sale(event_id, obj, existing, price_id, selected_plan)
         return existing, False
 
     if subscription_id and stripe_secret:
@@ -3820,6 +4093,18 @@ def process_checkout_completed(obj):
     member.status = current_member_status(member)
     db.session.add(member)
     db.session.flush()
+    if pending:
+        pending.member_id = member.id
+        pending.status = "fulfilled"
+        pending.fulfilled_at = datetime.utcnow()
+        if not Vehicle.query.filter_by(member_id=member.id).first():
+            db.session.add(Vehicle(
+                member_id=member.id,
+                year=pending.vehicle_year,
+                make=pending.vehicle_make,
+                model=pending.vehicle_model,
+            ))
+    create_referral_sale(event_id, obj, member, price_id, selected_plan)
     return member, True
 
 
@@ -3929,7 +4214,7 @@ def stripe_webhook():
 
     try:
         if event_type == "checkout.session.completed":
-            member, _was_created = process_checkout_completed(obj)
+            member, _was_created = process_checkout_completed(obj, event_id=event_id)
             wallet_sync_member = member
             ga4_checkout_session = obj
             tiktok_checkout_session = obj

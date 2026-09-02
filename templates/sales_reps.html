@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Sales Reps | Carnova Oil Club{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">REFERRAL PROGRAM</p><h1>Sales Reps</h1><p class="muted">Verified Stripe sales and commission tracking.</p></div></div>
+<section class="panel form-panel">
+  <div class="panel-heading"><h2>Add Sales Rep</h2></div>
+  <form class="form-grid" method="post">
+    <label>Name<input name="name" required></label>
+    <label>Slug<input name="slug" placeholder="diego" pattern="[a-z0-9-]+"></label>
+    <label>Phone<input name="phone"></label>
+    <label>Email<input name="email" type="email"></label>
+    <div class="wide actions"><button class="button primary" type="submit">Create Sales Rep</button></div>
+  </form>
+</section>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>Sales Rep</th><th>Referral Link</th><th>Status</th><th>Total</th><th>3 Change</th><th>5 Change</th><th>8 Change</th><th>Revenue</th><th>Pending</th><th>Paid</th><th></th></tr></thead><tbody>
+{% for item in summaries %}<tr><td><a href="{{ url_for('sales_rep_detail', rep_id=item.rep.id) }}"><strong>{{ item.rep.name }}</strong></a></td><td><input id="link-{{ item.rep.id }}" readonly value="{{ request.url_root.rstrip('/') }}{{ url_for('sales_rep_referral', slug=item.rep.slug) }}" onclick="this.select()"><button class="button ghost" type="button" onclick="navigator.clipboard.writeText(document.getElementById('link-{{ item.rep.id }}').value)">Copy Link</button></td><td><span class="badge {{ 'active' if item.rep.active else 'cancelled' }}">{{ 'Active' if item.rep.active else 'Inactive' }}</span></td><td>{{ item.total_sales }}</td><td>{{ item.package_counts[3] }}</td><td>{{ item.package_counts[5] }}</td><td>{{ item.package_counts[8] }}</td><td>${{ '%.2f'|format(item.total_revenue / 100) }}</td><td>${{ '%.2f'|format(item.pending / 100) }}</td><td>${{ '%.2f'|format(item.paid / 100) }}</td><td><form method="post" action="{{ url_for('toggle_sales_rep', rep_id=item.rep.id) }}"><button class="button ghost" type="submit">{{ 'Deactivate' if item.rep.active else 'Activate' }}</button></form></td></tr>
+{% else %}<tr><td colspan="8" class="empty">No sales reps yet.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

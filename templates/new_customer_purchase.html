@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Join Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="public-wrap">
+  <div class="page-heading"><div><p class="eyebrow gold">CARNOVA OIL CLUB</p><h1>Join the Oil Club</h1><p class="muted">Choose your package and enter your membership details.</p>{% if sales_rep %}<p class="muted">Assisted by {{ sales_rep.name }}</p>{% endif %}</div></div>
+  <section class="panel">
+    <form class="stack" id="purchase-form" method="post">
+      <div class="form-grid">
+        <label>Full name<input name="name" required autocomplete="name"></label>
+        <label>Mobile phone<input name="phone" required autocomplete="tel"></label>
+        <label>Email<input name="email" type="email" required autocomplete="email"></label>
+        <label>Vehicle year<input name="vehicle_year" required inputmode="numeric" pattern="[0-9]{4}" maxlength="4"></label>
+        <label>Vehicle make<input name="vehicle_make" required></label>
+        <label>Vehicle model<input name="vehicle_model" required></label>
+      </div>
+      <h2>Choose a package</h2>
+      <div class="plans-grid">
+      {% for plan in plans if not plan.subscription %}
+        <button class="panel plan-card purchase-plan" type="submit" data-action="{{ url_for('create_new_customer_checkout', plan_key=plan.price_id) }}"><span class="eyebrow">{{ plan.name }}</span><strong>{{ plan.changes }} oil changes</strong><span class="muted">{{ plan.price_display }}</span></button>
+      {% endfor %}
+      </div>
+    </form>
+  </section>
+</section>
+<script>
+  document.querySelectorAll('.purchase-plan').forEach(function (button) {
+    button.addEventListener('click', function () { document.getElementById('purchase-form').action = button.dataset.action; });
+  });
+</script>
+{% endblock %}

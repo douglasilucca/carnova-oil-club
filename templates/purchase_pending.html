@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}Payment Processing | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="public-wrap"><section class="panel confirmation-card"><p class="eyebrow gold">PAYMENT RECEIVED</p><h1>Your membership is being prepared</h1><p class="muted">Stripe payment confirmation is still being processed. Refresh this page in a moment to open your membership card.</p><a class="button primary" href="{{ url_for('new_customer_purchase_success', public_token=pending.public_token) }}">Refresh Membership Status</a></section></section>
+{% endblock %}
