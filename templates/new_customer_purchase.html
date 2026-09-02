@@ -7,7 +7,7 @@
     <h1>JOIN THE CARNOVA OIL CLUB</h1>
     <h2>Save More. Drive More.</h2>
     <p>Choose your prepaid synthetic oil change package and keep your maintenance simple.</p>
-    {% if sales_rep %}<p class="purchase-specialist">Your Carnova Oil Club Specialist: <strong>{{ sales_rep.name }}</strong></p>{% endif %}
+    {% if sales_rep_name %}<p class="purchase-specialist">Your Carnova Oil Club Specialist: <strong>{{ sales_rep_name }}</strong></p>{% endif %}
   </header>
 
   <form class="purchase-form" id="purchase-form" method="post" action="{{ url_for('create_new_customer_checkout', plan_key='price_1Tx6veR1GwRFNmYeUO2goMjz') }}">
