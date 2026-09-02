@@ -2124,7 +2124,12 @@ def public_member_buy(token):
 
 @app.route("/purchase")
 def new_customer_purchase():
-    return render_template("new_customer_purchase.html", sales_rep=current_referral_rep(), plans=stripe_plan_catalog())
+    sales_rep = current_referral_rep()
+    return render_template(
+        "new_customer_purchase.html",
+        sales_rep_name=sales_rep.name if sales_rep else None,
+        plans=stripe_plan_catalog(),
+    )
 
 
 @app.route("/purchase/<path:plan_key>", methods=["POST"])

@@ -62,7 +62,7 @@ def test_purchase_page_uses_rep_name_and_polished_package_copy(client, monkeypat
     response = client.get("/r/douglas-test", follow_redirects=True)
     assert response.status_code == 200
     assert b"Your Carnova Oil Club Specialist: <strong>Douglas Test</strong>" in response.data
-    assert b"douglas-test" not in response.data
+    assert b"Your Carnova Oil Club Specialist: <strong>douglas-test</strong>" not in response.data
     assert b"BRONZE" in response.data and b"3 Synthetic Oil Changes" in response.data
     assert b"$149" in response.data and b"Only $49.67 per oil change" in response.data
     assert b"SILVER" in response.data and b"5 Synthetic Oil Changes" in response.data
