@@ -18,6 +18,10 @@
         <label>Mobile Phone<input name="phone" required autocomplete="tel"></label>
         <label>Email<input name="email" type="email" required autocomplete="email"></label>
       </div>
+      <div class="sms-consent">
+        <label class="consent-label"><input type="checkbox" name="sms_consent"> <span>I agree to receive transactional SMS messages from Carnova Oil Club related to my purchase, membership, digital membership access, vehicle registration, service, and account notifications. Message frequency varies. Message and data rates may apply. Reply STOP to opt out or HELP for assistance. Consent is not required to purchase.</span></label>
+        <p class="consent-links"><a href="{{ url_for('privacy_policy') }}">Privacy Policy</a><span aria-hidden="true">·</span><a href="{{ url_for('sms_terms') }}">Terms &amp; Conditions</a></p>
+      </div>
     </section>
 
     <section class="purchase-section package-section">

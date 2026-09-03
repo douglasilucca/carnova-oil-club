@@ -128,11 +128,12 @@ def test_new_customer_checkout_stores_validated_data_and_opaque_metadata(client,
         id = "cs-new"
         url = "https://checkout.test/new"
     monkeypatch.setattr(stripe.checkout.Session, "create", lambda **kwargs: captured.setdefault("kwargs", kwargs) and Checkout())
-    response = client.post("/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz", data={"name": "New Buyer", "phone": "555-0100", "email": "new@example.com", "plan_key": "attacker", "sales_rep_id": "999"})
+    response = client.post("/purchase/price_1Tx6veR1GwRFNmYeUO2goMjz", data={"name": "New Buyer", "phone": "555-010-0100", "email": "new@example.com", "plan_key": "attacker", "sales_rep_id": "999"})
     assert response.status_code == 302
     with flask_app.app_context():
         pending = PendingCheckout.query.one()
         assert pending.email == "new@example.com"
+        assert pending.phone == "+15550100100"
         assert pending.vehicle_year == ""
         assert pending.vehicle_make == ""
         assert pending.vehicle_model == ""

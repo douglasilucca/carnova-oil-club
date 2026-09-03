@@ -56,6 +56,13 @@
   </article>
 </section>
 
+{% if sms_deliveries %}
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">MESSAGING</p><h2>Membership SMS</h2></div></div>
+  {% for delivery in sms_deliveries %}<p><span class="badge {{ delivery.status }}">{{ delivery.status|replace('_', ' ')|title }}</span></p>{% endfor %}
+</section>
+{% endif %}
+
 <section class="panel">
   <div class="panel-heading">
     <div><p class="eyebrow">CUSTOMER GARAGE</p><h2>Vehicles</h2></div>
