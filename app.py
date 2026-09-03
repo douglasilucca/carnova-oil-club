@@ -23,9 +23,11 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 import qrcode
 import stripe
+from twilio.rest import Client as TwilioClient
 from flask import Flask, Response, flash, has_request_context, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import UniqueConstraint, inspect, text
+from sqlalchemy.orm import validates
 from sqlalchemy.orm.exc import DetachedInstanceError
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -118,6 +120,15 @@ class PendingCheckout(db.Model):
     name = db.Column(db.String(255), nullable=False)
     phone = db.Column(db.String(50), nullable=False)
     email = db.Column(db.String(255), nullable=False, index=True)
+    sms_consent = db.Column(db.Boolean, nullable=False, default=False)
+
+    @staticmethod
+    def _normalize_email(value):
+        return (value or "").strip().lower()
+
+    @validates("email")
+    def validate_email(self, key, value):
+        return self._normalize_email(value)
     vehicle_year = db.Column(db.String(4), nullable=False, default="")
     vehicle_make = db.Column(db.String(100), nullable=False, default="")
     vehicle_model = db.Column(db.String(100), nullable=False, default="")
@@ -129,6 +140,26 @@ class PendingCheckout(db.Model):
 
     sales_rep = db.relationship("SalesRep", backref=db.backref("pending_checkouts", lazy=True))
     member = db.relationship("Member", backref=db.backref("pending_checkouts", lazy=True))
+
+
+class SmsDelivery(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False, index=True)
+    referral_sale_id = db.Column(db.Integer, db.ForeignKey("referral_sale.id"), nullable=True, index=True)
+    purpose = db.Column(db.String(50), nullable=False)
+    phone_number = db.Column(db.String(20), nullable=False)
+    provider = db.Column(db.String(30), nullable=False, default="twilio")
+    provider_message_sid = db.Column(db.String(255))
+    status = db.Column(db.String(20), nullable=False, default="not_sent")
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_error = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    sent_at = db.Column(db.DateTime)
+
+    __table_args__ = (db.UniqueConstraint("member_id", "purpose", name="uq_sms_delivery_member_purpose"),)
+
+    member = db.relationship("Member", backref=db.backref("sms_deliveries", lazy=True))
+    referral_sale = db.relationship("ReferralSale", backref=db.backref("sms_deliveries", lazy=True))
 
 
 
@@ -420,6 +451,11 @@ def add_missing_columns():
             if column_name not in sales_rep_columns:
                 statements.append(f"ALTER TABLE sales_rep ADD COLUMN {column_name} {definition}")
 
+    if "pending_checkout" in tables:
+        pending_columns = {column["name"] for column in inspector.get_columns("pending_checkout")}
+        if "sms_consent" not in pending_columns:
+            statements.append("ALTER TABLE pending_checkout ADD COLUMN sms_consent BOOLEAN DEFAULT 0 NOT NULL")
+
     if "redemption" not in tables:
         for statement in statements:
             try:
@@ -515,6 +551,15 @@ def current_referral_rep():
         session.pop(REFERRAL_ATTRIBUTION_KEY, None)
         return None
     return rep
+
+
+def normalize_us_phone(value):
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return None
 
 
 @app.route("/r/<slug>")
@@ -1968,6 +2013,16 @@ def health():
     return {"status": "ok"}, 200
 
 
+@app.route("/privacy")
+def privacy_policy():
+    return render_template("privacy.html")
+
+
+@app.route("/terms")
+def sms_terms():
+    return render_template("terms.html")
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -2252,6 +2307,8 @@ def create_new_customer_checkout(plan_key):
     name = request.form.get("name", "").strip()
     phone = request.form.get("phone", "").strip()
     email = request.form.get("email", "").strip().lower()
+    sms_consent = request.form.get("sms_consent") == "on"
+    phone = normalize_us_phone(phone)
     if not name or not phone or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         flash("Please provide valid contact information.", "error")
         return redirect(url_for("new_customer_purchase"))
@@ -2263,6 +2320,7 @@ def create_new_customer_checkout(plan_key):
         name=name,
         phone=phone,
         email=email,
+        sms_consent=sms_consent,
         stripe_price_id=plan_key,
     )
     db.session.add(pending)
@@ -2299,6 +2357,11 @@ def new_customer_purchase_success(public_token):
     if pending.member_id:
         member = db.session.get(Member, pending.member_id)
         if member:
+            delivery = SmsDelivery.query.filter_by(member_id=member.id, purpose="membership_ready").first()
+            if delivery and delivery.status == "sent":
+                flash("Your membership is ready. We sent your membership link by text message. Please keep the message for future access.", "success")
+            elif delivery and delivery.status == "failed":
+                flash("Your membership is ready. You can access it here and add it to your wallet.", "success")
             return redirect(url_for("member_public", token=member.token))
     return render_template("purchase_pending.html", pending=pending)
 
@@ -2366,12 +2429,14 @@ def member_detail(member_id):
     )
     public_url = member_public_url(member)
     vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
+    sms_deliveries = SmsDelivery.query.filter_by(member_id=member.id).order_by(SmsDelivery.created_at.desc()).all()
     return render_template(
         "member_detail.html",
         member=member,
         vehicles=vehicles,
         redemptions=redemptions,
         public_url=public_url,
+        sms_deliveries=sms_deliveries,
     )
 
 
@@ -4061,6 +4126,68 @@ def send_tiktok_purchase_event(checkout_session, member):
         print("TikTok purchase event error:", type(error).__name__)
 
 
+def send_membership_ready_sms(member, checkout_session, sms_consent=False):
+    phone_number = normalize_us_phone(member.phone)
+    delivery = SmsDelivery.query.filter_by(member_id=member.id, purpose="membership_ready").first()
+    if delivery:
+        return delivery
+
+    delivery = SmsDelivery(
+        member_id=member.id,
+        referral_sale_id=ReferralSale.query.filter_by(
+            stripe_checkout_session_id=checkout_session.get("id")
+        ).with_entities(ReferralSale.id).scalar(),
+        purpose="membership_ready",
+        phone_number=phone_number or member.phone or "",
+        provider="twilio",
+        status="not_sent",
+    )
+    db.session.add(delivery)
+    db.session.flush()
+    # SMS consent only affects whether we attempt delivery; fulfillment is already committed above this point.
+    if not sms_consent:
+        delivery.status = "no_consent"
+        delivery.last_error = "Customer did not opt in to SMS"
+        db.session.commit()
+        return delivery
+    if not phone_number:
+        delivery.last_error = "Invalid US phone number"
+        db.session.commit()
+        return delivery
+
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
+    if not account_sid or not auth_token or not from_number:
+        delivery.last_error = "Twilio is not configured"
+        db.session.commit()
+        return delivery
+
+    delivery.phone_number = phone_number
+    delivery.status = "sending"
+    delivery.attempts = 1
+    db.session.commit()
+    try:
+        message = TwilioClient(account_sid, auth_token).messages.create(
+            body=(
+                "Carnova Oil Club: Your membership is ready! Access your membership "
+                "and add it to Apple Wallet or Google Wallet: "
+                f"{member_public_url(member)} Please keep this message for future access."
+            ),
+            from_=from_number,
+            to=phone_number,
+        )
+        delivery.provider_message_sid = message.sid
+        delivery.status = "sent"
+        delivery.sent_at = datetime.utcnow()
+    except Exception as error:
+        delivery.status = "failed"
+        delivery.last_error = type(error).__name__
+        print("Membership SMS delivery failed:", type(error).__name__)
+    db.session.commit()
+    return delivery
+
+
 def process_checkout_completed(obj, event_id=None):
     details = obj.get("customer_details") or {}
     shipping = obj.get("shipping_details") or {}
@@ -4079,7 +4206,7 @@ def process_checkout_completed(obj, event_id=None):
         or metadata.get("customer_name")
         or obj.get("customer_name")
     )
-    customer_phone = details.get("phone") or shipping.get("phone") or (pending.phone if pending else "")
+    customer_phone = (pending.phone if pending else "") or details.get("phone") or shipping.get("phone") or ""
     customer_id = stripe_object_id(obj.get("customer"))
     subscription_id = stripe_object_id(obj.get("subscription"))
     payment_id = stripe_object_id(obj.get("payment_intent")) or obj.get("id")
@@ -4311,13 +4438,21 @@ def stripe_webhook():
     event_type = event.get("type")
     obj = event["data"]["object"]
     member = None
+    new_member_checkout = False
     wallet_sync_member = None
     ga4_checkout_session = None
     tiktok_checkout_session = None
+    sms_consent = False
 
     try:
         if event_type == "checkout.session.completed":
-            member, _was_created = process_checkout_completed(obj, event_id=event_id)
+            new_member_checkout = bool((obj.get("metadata") or {}).get("pending_checkout_token"))
+            pending_token = (obj.get("metadata") or {}).get("pending_checkout_token")
+            pending_checkout = PendingCheckout.query.filter_by(public_token=pending_token).first() if pending_token else None
+            # Consent governs only the outbound SMS attempt. It must never block a verified member fulfillment.
+            sms_consent = bool(pending_checkout and pending_checkout.sms_consent)
+            member, was_created = process_checkout_completed(obj, event_id=event_id)
+            new_member_checkout = bool(pending_checkout) and was_created
             wallet_sync_member = member
             ga4_checkout_session = obj
             tiktok_checkout_session = obj
@@ -4352,6 +4487,9 @@ def stripe_webhook():
 
     if tiktok_checkout_session and member:
         send_tiktok_purchase_event(tiktok_checkout_session, member)
+
+    if new_member_checkout and member:
+        send_membership_ready_sms(member, obj, sms_consent=sms_consent)
 
     if wallet_sync_member:
         try:

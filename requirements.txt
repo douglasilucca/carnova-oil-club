@@ -5,6 +5,7 @@ cryptography==45.0.0
 httpx[http2]==0.28.1
 qrcode[pil]==8.0
 stripe==11.6.0
+twilio==9.8.3
 google-auth==2.35.0
 tzdata==2025.2
 gunicorn==23.0.0
