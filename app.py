@@ -679,6 +679,7 @@ def sales_dashboard(rep):
     today = date.today()
     month_start = date(today.year, today.month, 1)
     month_sales = [sale for sale in sales if sale.created_at.date() >= month_start]
+    monthly_bonus = calculate_monthly_sales_bonus(sales)
     pending = sum(sale.commission_cents or 0 for sale in sales if sale.commission_status == "pending")
     paid = sum(sale.commission_cents or 0 for sale in sales if sale.commission_status == "paid")
     counts = {changes: sum(sale.oil_changes == changes for sale in sales) for changes in (3, 5, 8)}
@@ -694,6 +695,7 @@ def sales_dashboard(rep):
             "paid": paid,
             "earned": pending + paid,
             "counts": counts,
+            "monthly_bonus": monthly_bonus,
         },
     )
 
@@ -751,7 +753,13 @@ def sales_reps():
 @login_required
 def sales_rep_detail(rep_id):
     rep = db.get_or_404(SalesRep, rep_id)
-    return render_template("sales_rep_detail.html", rep=rep, sales=ReferralSale.query.filter_by(sales_rep_id=rep.id).order_by(ReferralSale.created_at.desc()).all())
+    sales = ReferralSale.query.filter_by(sales_rep_id=rep.id).order_by(ReferralSale.created_at.desc()).all()
+    return render_template(
+        "sales_rep_detail.html",
+        rep=rep,
+        sales=sales,
+        monthly_bonus=calculate_monthly_sales_bonus(sales),
+    )
 
 
 @app.route("/admin/sales-reps/<int:rep_id>/toggle", methods=["POST"])
@@ -3883,6 +3891,47 @@ STRIPE_PLANS = {
 }
 
 COMMISSION_CENTS_BY_CHANGES = {3: 1000, 5: 1500, 8: 2000}
+QUALIFYING_SALE_STATUSES = frozenset(("pending", "paid"))
+MONTHLY_BONUS_TIERS = (
+    (0, 0),
+    (10, 5000),
+    (20, 15000),
+    (30, 30000),
+    (40, 50000),
+)
+
+
+def calculate_monthly_sales_bonus(sales, month=None):
+    """Return the current month's qualifying sale count and earned bonus in cents."""
+    month = month or datetime.utcnow()
+    qualifying_sales = sum(
+        1
+        for sale in sales
+        if sale.commission_status in QUALIFYING_SALE_STATUSES
+        and sale.created_at
+        and sale.created_at.year == month.year
+        and sale.created_at.month == month.month
+    )
+    current_threshold, current_bonus_cents = MONTHLY_BONUS_TIERS[0]
+    next_threshold = None
+    next_bonus_cents = None
+    for threshold, bonus_cents in MONTHLY_BONUS_TIERS:
+        if qualifying_sales >= threshold:
+            current_threshold, current_bonus_cents = threshold, bonus_cents
+        else:
+            next_threshold, next_bonus_cents = threshold, bonus_cents
+            break
+    max_reached = next_threshold is None
+    return {
+        "qualifying_sales": qualifying_sales,
+        "bonus_cents": current_bonus_cents,
+        "next_threshold": next_threshold,
+        "next_bonus_cents": next_bonus_cents,
+        "additional_sales_needed": 0 if max_reached else next_threshold - qualifying_sales,
+        "max_reached": max_reached,
+        "progress_percent": 100 if max_reached else round(qualifying_sales / next_threshold * 100),
+        "current_threshold": current_threshold,
+    }
 
 
 def create_referral_sale(event_id, checkout_session, member, price_id, selected_plan):
