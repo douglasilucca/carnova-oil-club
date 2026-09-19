@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Activate Sales Rep Portal | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="login-card">
+  <p class="eyebrow gold">CARNOVA OIL CLUB</p>
+  {% if error %}
+  <h1>Activation unavailable</h1>
+  <p class="muted">{{ error }}</p>
+  <a class="button primary" href="{{ url_for('sales_login') }}">Go to Sales Rep Login</a>
+  {% else %}
+  <h1>Activate Your Portal</h1>
+  <p class="muted">Create a password for {{ rep.name }} to access the Sales Rep Portal.</p>
+  <form method="post">
+    <label>Password<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+    <label>Confirm password<input name="password_confirmation" type="password" minlength="8" required autocomplete="new-password"></label>
+    <button class="button primary" type="submit">Activate Portal</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

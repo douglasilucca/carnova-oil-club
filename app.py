@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -90,6 +91,11 @@ class SalesRep(db.Model):
     password_hash = db.Column(db.String(255))
     last_login_at = db.Column(db.DateTime)
     portal_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    activation_token_hash = db.Column(db.String(64), unique=True, index=True)
+    activation_token_expires_at = db.Column(db.DateTime)
+    activation_sms_status = db.Column(db.String(20), nullable=False, default="pending")
+    activation_sms_error = db.Column(db.String(500))
+    activation_sms_sent_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 
@@ -444,8 +450,13 @@ def add_missing_columns():
         sales_rep_column_definitions = {
             "login_email": "VARCHAR(255)",
             "password_hash": "VARCHAR(255)",
-            "last_login_at": "DATETIME",
+            "last_login_at": "TIMESTAMP",
             "portal_enabled": "BOOLEAN DEFAULT 0 NOT NULL",
+            "activation_token_hash": "VARCHAR(64)",
+            "activation_token_expires_at": "TIMESTAMP",
+            "activation_sms_status": "VARCHAR(20) DEFAULT 'pending' NOT NULL",
+            "activation_sms_error": "VARCHAR(500)",
+            "activation_sms_sent_at": "TIMESTAMP",
         }
         for column_name, definition in sales_rep_column_definitions.items():
             if column_name not in sales_rep_columns:
@@ -590,6 +601,71 @@ def sales_login():
     return render_template("sales_login.html")
 
 
+def sales_rep_activation_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def send_sales_rep_activation_sms(rep, activation_url):
+    phone_number = normalize_us_phone(rep.phone)
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
+    if not phone_number:
+        rep.activation_sms_status = "failed"
+        rep.activation_sms_error = "Sales rep phone number is missing or invalid"
+        db.session.commit()
+        return
+    if not account_sid or not auth_token or not from_number:
+        rep.activation_sms_status = "failed"
+        rep.activation_sms_error = "Twilio is not configured"
+        db.session.commit()
+        return
+
+    try:
+        message = TwilioClient(account_sid, auth_token).messages.create(
+            body=(
+                "Carnova Oil Club: Set up your Sales Rep Portal password using this secure "
+                f"activation link: {activation_url}"
+            ),
+            from_=from_number,
+            to=phone_number,
+        )
+        rep.activation_sms_status = "sent"
+        rep.activation_sms_error = None
+        rep.activation_sms_sent_at = datetime.utcnow()
+        app.logger.info("Sales rep activation SMS sent for rep %s: %s", rep.id, message.sid)
+    except Exception as error:
+        rep.activation_sms_status = "failed"
+        rep.activation_sms_error = f"{type(error).__name__}: {error}"[:500]
+        logging.getLogger(__name__).exception("Sales rep activation SMS failed for rep %s", rep.id)
+    db.session.commit()
+
+
+@app.route("/sales/activate/<token>", methods=["GET", "POST"])
+def activate_sales_rep(token):
+    token_hash = sales_rep_activation_hash(token)
+    rep = SalesRep.query.filter_by(activation_token_hash=token_hash).first()
+    error = None
+    if not rep or not rep.activation_token_expires_at or rep.activation_token_expires_at <= datetime.utcnow():
+        error = "This activation link is invalid or has expired."
+    elif request.method == "POST":
+        password = request.form.get("password", "")
+        confirmation = request.form.get("password_confirmation", "")
+        if len(password) < 8:
+            error = "Your password must be at least 8 characters."
+        elif password != confirmation:
+            error = "The passwords do not match."
+        else:
+            rep.password_hash = generate_password_hash(password)
+            rep.portal_enabled = True
+            rep.activation_token_hash = None
+            rep.activation_token_expires_at = None
+            db.session.commit()
+            flash("Your Sales Rep Portal password is set. You can now sign in.", "success")
+            return redirect(url_for("sales_login"))
+    return render_template("sales_rep_activation.html", rep=rep, error=error)
+
+
 @app.route("/sales/logout", methods=["POST"])
 def sales_logout():
     session.pop("sales_rep_id", None)
@@ -633,21 +709,26 @@ def sales_reps():
         elif SalesRep.query.filter_by(slug=slug).first():
             flash("That referral slug is already in use.", "error")
         else:
-            login_email = request.form.get("login_email", "").strip().lower() or None
-            login_password = request.form.get("login_password", "")
-            if login_email and SalesRep.query.filter_by(login_email=login_email).first():
-                flash("That portal email is already in use.", "error")
+            email = request.form.get("email", "").strip().lower()
+            if not email:
+                flash("An email address is required for portal activation.", "error")
                 return redirect(url_for("sales_reps"))
-            db.session.add(SalesRep(
+            if SalesRep.query.filter_by(login_email=email).first():
+                flash("That email is already in use for a sales rep portal.", "error")
+                return redirect(url_for("sales_reps"))
+            activation_token = secrets.token_urlsafe(32)
+            rep = SalesRep(
                 name=name,
                 slug=slug,
                 phone=request.form.get("phone", "").strip(),
-                email=request.form.get("email", "").strip().lower(),
-                login_email=login_email,
-                password_hash=generate_password_hash(login_password) if login_password else None,
-                portal_enabled=bool(login_email and login_password),
-            ))
+                email=email,
+                login_email=email,
+                activation_token_hash=sales_rep_activation_hash(activation_token),
+                activation_token_expires_at=datetime.utcnow() + timedelta(hours=24),
+            )
+            db.session.add(rep)
             db.session.commit()
+            send_sales_rep_activation_sms(rep, url_for("activate_sales_rep", token=activation_token, _external=True))
             flash("Sales rep created.", "success")
             return redirect(url_for("sales_reps"))
     reps = SalesRep.query.order_by(SalesRep.name.asc()).all()
