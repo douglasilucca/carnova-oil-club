@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Carnova Card | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="login-card">
+  <p class="eyebrow gold">CARNOVA CARD</p>
+  <h1>{{ display_name }}</h1>
+  {% if card.sales_rep %}
+  <p class="muted">Sales Representative</p>
+  <div class="stack">
+    <a class="button primary" href="{{ sales_link }}">Buy with My Link</a>
+    <a class="button ghost" href="{{ portal_url }}">Sales Rep Portal</a>
+  </div>
+  {% endif %}
+  {% if card.member %}
+  <div class="stack">
+    <a class="button secondary" href="{{ member_url }}">View Membership</a>
+    <a class="button secondary" href="{{ schedule_url }}">Schedule Service</a>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -28,6 +28,7 @@ from twilio.rest import Client as TwilioClient
 from flask import Flask, Response, flash, has_request_context, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import UniqueConstraint, inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import validates
 from sqlalchemy.orm.exc import DetachedInstanceError
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -96,6 +97,8 @@ class SalesRep(db.Model):
     activation_sms_status = db.Column(db.String(20), nullable=False, default="pending")
     activation_sms_error = db.Column(db.String(500))
     activation_sms_sent_at = db.Column(db.DateTime)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=True, unique=True, index=True)
+    member = db.relationship("Member", backref=db.backref("sales_rep", uselist=False))
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 
@@ -171,7 +174,8 @@ class SmsDelivery(db.Model):
 
 class AppleWalletPass(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False, index=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=True, index=True)
+    carnova_card_id = db.Column(db.Integer, db.ForeignKey("carnova_card.id"), nullable=True, unique=True, index=True)
     pass_type_identifier = db.Column(db.String(255), nullable=False, default=lambda: os.environ.get("APPLE_PASS_TYPE_ID", "pass.com.carnovaoil.membership"))
     serial_number = db.Column(db.String(255), nullable=False)
     authentication_token_encrypted = db.Column(db.Text, nullable=False)
@@ -183,6 +187,11 @@ class AppleWalletPass(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     member = db.relationship("Member", backref=db.backref("apple_wallet_pass", uselist=False, cascade="all, delete-orphan"))
+    carnova_card = db.relationship(
+        "CarnovaCard",
+        foreign_keys=[carnova_card_id],
+        back_populates="apple_wallet_pass",
+    )
     registrations = db.relationship("AppleWalletRegistration", backref="pass_record", lazy=True, cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -229,7 +238,38 @@ class AppleWalletPass(db.Model):
         pass_record = cls.query.filter_by(member_id=member.id).first()
         if pass_record:
             return pass_record
+        if member.carnova_card and member.carnova_card.apple_wallet_pass:
+            pass_record = member.carnova_card.apple_wallet_pass
+            if pass_record.member_id is None:
+                pass_record.member_id = member.id
+                db.session.add(pass_record)
+                db.session.commit()
+            return pass_record
         return cls.create_for_member(member)
+
+    @classmethod
+    def create_for_card(cls, card):
+        if not card:
+            return None
+        existing = cls.query.filter_by(carnova_card_id=card.id).first()
+        if existing:
+            return existing
+        token = secrets.token_urlsafe(32)
+        encrypted, nonce = apple_wallet_encrypt_token(token)
+        pass_record = cls(
+            member_id=card.member_id,
+            carnova_card_id=card.id,
+            pass_type_identifier=os.environ.get("APPLE_PASS_TYPE_ID", "pass.com.carnovaoil.membership").strip(),
+            serial_number=f"carnova-card-{secrets.token_urlsafe(24)}",
+            authentication_token_encrypted=encrypted,
+            authentication_token_nonce=nonce,
+            authentication_token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            web_service_url=apple_wallet_web_service_url(),
+            last_updated=1,
+        )
+        db.session.add(pass_record)
+        db.session.commit()
+        return pass_record
 
     @property
     def authentication_token(self):
@@ -256,6 +296,38 @@ class AppleWalletPass(db.Model):
         db.session.add(self)
         print(f"Apple Wallet pass change sequence advanced to {self.last_updated}")
         return self.last_updated
+
+
+class CarnovaCard(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    stable_card_token = db.Column(
+        db.String(64),
+        unique=True,
+        nullable=False,
+        index=True,
+        default=lambda: secrets.token_urlsafe(32),
+    )
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=True, unique=True, index=True)
+    sales_rep_id = db.Column(db.Integer, db.ForeignKey("sales_rep.id"), nullable=True, unique=True, index=True)
+    google_object_id = db.Column(db.String(255), unique=True, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    member = db.relationship("Member", backref=db.backref("carnova_card", uselist=False))
+    sales_rep = db.relationship("SalesRep", backref=db.backref("carnova_card", uselist=False))
+    apple_wallet_pass = db.relationship(
+        "AppleWalletPass",
+        foreign_keys="[AppleWalletPass.carnova_card_id]",
+        back_populates="carnova_card",
+        uselist=False,
+    )
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "member_id IS NOT NULL OR sales_rep_id IS NOT NULL",
+            name="ck_carnova_card_has_owner",
+        ),
+    )
 
 
 class AppleWalletDevice(db.Model):
@@ -427,6 +499,21 @@ def add_missing_columns():
     tables = inspector.get_table_names()
     statements = []
 
+    if "carnova_card" not in tables:
+        card_id_definition = "SERIAL PRIMARY KEY" if db.engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY"
+        statements.append(
+            "CREATE TABLE IF NOT EXISTS carnova_card ("
+            f"id {card_id_definition}, "
+            "stable_card_token VARCHAR(64) NOT NULL UNIQUE, "
+            "member_id INTEGER UNIQUE REFERENCES member (id), "
+            "sales_rep_id INTEGER UNIQUE REFERENCES sales_rep (id), "
+            "google_object_id VARCHAR(255) UNIQUE, "
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "CONSTRAINT ck_carnova_card_has_owner CHECK (member_id IS NOT NULL OR sales_rep_id IS NOT NULL)"
+            ")"
+        )
+
     if "member" in tables:
         member_columns = {column["name"] for column in inspector.get_columns("member")}
         member_column_definitions = {
@@ -457,15 +544,59 @@ def add_missing_columns():
             "activation_sms_status": "VARCHAR(20) DEFAULT 'pending' NOT NULL",
             "activation_sms_error": "VARCHAR(500)",
             "activation_sms_sent_at": "TIMESTAMP",
+            "member_id": "INTEGER",
         }
         for column_name, definition in sales_rep_column_definitions.items():
             if column_name not in sales_rep_columns:
                 statements.append(f"ALTER TABLE sales_rep ADD COLUMN {column_name} {definition}")
+        member_id_will_exist = "member_id" in sales_rep_columns or "member_id" in sales_rep_column_definitions
+        if db.engine.dialect.name == "postgresql" and member_id_will_exist:
+            unique_constraints = {constraint.get("name") for constraint in inspector.get_unique_constraints("sales_rep")}
+            if "uq_sales_rep_member_id" not in unique_constraints:
+                statements.append(
+                    "ALTER TABLE sales_rep ADD CONSTRAINT uq_sales_rep_member_id UNIQUE (member_id)"
+                )
+            foreign_keys = inspector.get_foreign_keys("sales_rep")
+            has_member_foreign_key = any(
+                foreign_key.get("referred_table") == "member"
+                and foreign_key.get("constrained_columns") == ["member_id"]
+                for foreign_key in foreign_keys
+            )
+            if not has_member_foreign_key:
+                statements.append(
+                    "ALTER TABLE sales_rep ADD CONSTRAINT fk_sales_rep_member_id "
+                    "FOREIGN KEY (member_id) REFERENCES member (id)"
+                )
 
     if "pending_checkout" in tables:
         pending_columns = {column["name"] for column in inspector.get_columns("pending_checkout")}
         if "sms_consent" not in pending_columns:
             statements.append("ALTER TABLE pending_checkout ADD COLUMN sms_consent BOOLEAN DEFAULT 0 NOT NULL")
+
+    if "apple_wallet_pass" in tables:
+        apple_pass_columns = {column["name"] for column in inspector.get_columns("apple_wallet_pass")}
+        if "carnova_card_id" not in apple_pass_columns:
+            statements.append("ALTER TABLE apple_wallet_pass ADD COLUMN carnova_card_id INTEGER")
+        if db.engine.dialect.name == "postgresql":
+            member_column = next((column for column in inspector.get_columns("apple_wallet_pass") if column["name"] == "member_id"), None)
+            if member_column and member_column.get("nullable") is False:
+                statements.append("ALTER TABLE apple_wallet_pass ALTER COLUMN member_id DROP NOT NULL")
+            apple_unique_constraints = {constraint.get("name") for constraint in inspector.get_unique_constraints("apple_wallet_pass")}
+            if "uq_apple_wallet_carnova_card" not in apple_unique_constraints:
+                statements.append(
+                    "ALTER TABLE apple_wallet_pass ADD CONSTRAINT uq_apple_wallet_carnova_card UNIQUE (carnova_card_id)"
+                )
+            apple_foreign_keys = inspector.get_foreign_keys("apple_wallet_pass")
+            has_card_foreign_key = any(
+                foreign_key.get("referred_table") == "carnova_card"
+                and foreign_key.get("constrained_columns") == ["carnova_card_id"]
+                for foreign_key in apple_foreign_keys
+            )
+            if not has_card_foreign_key:
+                statements.append(
+                    "ALTER TABLE apple_wallet_pass ADD CONSTRAINT fk_apple_wallet_carnova_card "
+                    "FOREIGN KEY (carnova_card_id) REFERENCES carnova_card (id)"
+                )
 
     if "redemption" not in tables:
         for statement in statements:
@@ -585,6 +716,25 @@ def sales_rep_referral(slug):
     return redirect(url_for("new_customer_purchase"))
 
 
+@app.route("/card/<stable_card_token>")
+def public_carnova_card(stable_card_token):
+    card = CarnovaCard.query.filter_by(stable_card_token=stable_card_token).first_or_404()
+    base_url = resolve_public_base_url()
+    sales_link = f"{base_url}{url_for('sales_rep_referral', slug=card.sales_rep.slug)}" if card.sales_rep else ""
+    portal_url = f"{base_url}{url_for('sales_login')}" if card.sales_rep else ""
+    member_url = member_public_url(card.member) if card.member else ""
+    schedule_url = f"{base_url}{url_for('public_new_appointment', token=card.member.token)}" if card.member else ""
+    return render_template(
+        "carnova_card_public.html",
+        card=card,
+        display_name=card.member.name if card.member else card.sales_rep.name,
+        sales_link=sales_link,
+        portal_url=portal_url,
+        member_url=member_url,
+        schedule_url=schedule_url,
+    )
+
+
 @app.route("/sales/login", methods=["GET", "POST"])
 def sales_login():
     if request.method == "POST":
@@ -605,7 +755,7 @@ def sales_rep_activation_hash(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def send_sales_rep_activation_sms(rep, activation_url):
+def send_sales_rep_activation_sms(rep, activation_url, message_body=None):
     phone_number = normalize_us_phone(rep.phone)
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
@@ -623,7 +773,7 @@ def send_sales_rep_activation_sms(rep, activation_url):
 
     try:
         message = TwilioClient(account_sid, auth_token).messages.create(
-            body=(
+            body=message_body or (
                 "Carnova Oil Club: Set up your Sales Rep Portal password using this secure "
                 f"activation link: {activation_url}"
             ),
@@ -639,6 +789,41 @@ def send_sales_rep_activation_sms(rep, activation_url):
         rep.activation_sms_error = f"{type(error).__name__}: {error}"[:500]
         logging.getLogger(__name__).exception("Sales rep activation SMS failed for rep %s", rep.id)
     db.session.commit()
+
+
+def send_automatic_sales_rep_activation(member):
+    """Prepare and send one activation SMS after checkout has committed."""
+    rep = member.sales_rep if member else None
+    if not rep or rep.portal_enabled or rep.activation_sms_status == "sent":
+        return False
+    if rep.activation_token_hash and rep.activation_token_expires_at and rep.activation_token_expires_at > datetime.utcnow():
+        return False
+
+    token = secrets.token_urlsafe(32)
+    rep.activation_token_hash = sales_rep_activation_hash(token)
+    rep.activation_token_expires_at = datetime.utcnow() + timedelta(hours=24)
+    rep.activation_sms_status = "pending"
+    rep.activation_sms_error = None
+    try:
+        db.session.commit()
+    except Exception as error:
+        db.session.rollback()
+        rep = db.session.get(SalesRep, rep.id)
+        if rep:
+            rep.activation_sms_status = "failed"
+            rep.activation_sms_error = f"{type(error).__name__}: {error}"[:500]
+            db.session.commit()
+        logging.getLogger(__name__).exception("Automatic SalesRep activation preparation failed")
+        return False
+
+    activation_url = url_for("activate_sales_rep", token=token, _external=True)
+    message_body = (
+        "Welcome to Carnova! Your Oil Club membership also gives you access to the "
+        "Carnova Sales Program. Share your personal link and earn commissions on "
+        f"qualifying sales. Activate your Sales Portal: {activation_url}"
+    )
+    send_sales_rep_activation_sms(rep, activation_url, message_body=message_body)
+    return True
 
 
 @app.route("/sales/activate/<token>", methods=["GET", "POST"])
@@ -700,6 +885,45 @@ def sales_dashboard(rep):
     )
 
 
+@app.route("/sales/google-wallet", methods=["POST"])
+@sales_rep_login_required
+def sales_rep_google_wallet(rep):
+    card = ensure_carnova_card(sales_rep=rep)["card"]
+    if not card or not google_wallet_is_configured():
+        flash("Google Wallet is unavailable right now. Please try again later.", "error")
+        return redirect(url_for("sales_dashboard"))
+    try:
+        if not sync_carnova_card_google_wallet(card):
+            raise RuntimeError("Google Wallet object update failed")
+        save_url = google_wallet_save_url_for_object(google_wallet_card_object_id(card))
+        if google_wallet_save_url_is_safe(save_url):
+            return redirect(save_url)
+    except Exception as error:
+        print(f"SalesRep Google Wallet error for card {card.id}: {error}")
+    flash("Google Wallet is unavailable right now. Please try again later.", "error")
+    return redirect(url_for("sales_dashboard"))
+
+
+@app.route("/sales/apple-wallet")
+@sales_rep_login_required
+def sales_rep_apple_wallet(rep):
+    card = ensure_carnova_card(sales_rep=rep)["card"]
+    if not card:
+        return "Carnova Card is unavailable.", 503
+    try:
+        bundle_path = apple_wallet_build_bundle(card=card)
+    except (FileNotFoundError, ValueError):
+        return "Apple Wallet is not configured for this environment.", 503
+    except subprocess.CalledProcessError:
+        return "Apple Wallet pass signing failed.", 500
+    return send_file(
+        bundle_path,
+        mimetype="application/vnd.apple.pkpass",
+        as_attachment=True,
+        download_name=f"carnova-card-{card.stable_card_token}.pkpass",
+    )
+
+
 @app.route("/admin/sales-reps", methods=["GET", "POST"])
 @login_required
 def sales_reps():
@@ -729,6 +953,7 @@ def sales_reps():
                 activation_token_expires_at=datetime.utcnow() + timedelta(hours=24),
             )
             db.session.add(rep)
+            ensure_carnova_card(sales_rep=rep)
             db.session.commit()
             send_sales_rep_activation_sms(rep, url_for("activate_sales_rep", token=activation_token, _external=True))
             flash("Sales rep created.", "success")
@@ -754,12 +979,82 @@ def sales_reps():
 def sales_rep_detail(rep_id):
     rep = db.get_or_404(SalesRep, rep_id)
     sales = ReferralSale.query.filter_by(sales_rep_id=rep.id).order_by(ReferralSale.created_at.desc()).all()
+    member_search = request.args.get("member_search", "").strip()
+    member_query = Member.query
+    if member_search:
+        search_value = f"%{member_search}%"
+        member_query = member_query.filter(
+            db.or_(
+                Member.name.ilike(search_value),
+                Member.member_id.ilike(search_value),
+                Member.email.ilike(search_value),
+            )
+        )
+    member_options = member_query.order_by(Member.name.asc()).limit(100).all()
+    if rep.member and all(option.id != rep.member.id for option in member_options):
+        member_options.insert(0, rep.member)
     return render_template(
         "sales_rep_detail.html",
         rep=rep,
         sales=sales,
         monthly_bonus=calculate_monthly_sales_bonus(sales),
+        member_options=member_options,
+        member_search=member_search,
     )
+
+
+@app.route("/admin/sales-reps/<int:rep_id>/member", methods=["POST"])
+@login_required
+def update_sales_rep_member(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    selected_member_id = request.form.get("member_id", "").strip()
+    if not selected_member_id:
+        card = rep.carnova_card
+        member = rep.member
+        if card and member and member.carnova_card and member.carnova_card.id != card.id:
+            flash("This identity has conflicting Carnova Cards and needs review before unlinking.", "error")
+            return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+        rep.member_id = None
+        db.session.commit()
+        if card and card.member_id == (member.id if member else None):
+            card.member_id = None
+            db.session.commit()
+            if card.apple_wallet_pass:
+                apple_wallet_mark_card_updated(card)
+            sync_carnova_card_google_wallet(card)
+        flash("Linked Oil Club Member removed.", "success")
+        return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+    if not selected_member_id.isdigit():
+        flash("Select a valid Oil Club Member.", "error")
+        return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+
+    member = db.session.get(Member, int(selected_member_id))
+    if not member:
+        flash("That Oil Club Member was not found.", "error")
+        return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+    existing_rep = SalesRep.query.filter(
+        SalesRep.member_id == member.id,
+        SalesRep.id != rep.id,
+    ).first()
+    if existing_rep:
+        flash("That Oil Club Member is already linked to another Sales Rep.", "error")
+        return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+
+    rep.member_id = member.id
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash("That Oil Club Member is already linked to another Sales Rep.", "error")
+        return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+    ensure_carnova_card(member=member, sales_rep=rep)
+    db.session.commit()
+    if getattr(rep.carnova_card, "_apple_roles_changed", False):
+        apple_wallet_mark_card_updated(rep.carnova_card)
+    if getattr(rep.carnova_card, "_google_roles_changed", False):
+        sync_carnova_card_google_wallet(rep.carnova_card)
+    flash("Oil Club Member linked.", "success")
+    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
 
 
 @app.route("/admin/sales-reps/<int:rep_id>/toggle", methods=["POST"])
@@ -1072,6 +1367,24 @@ def apple_wallet_mark_pass_updated(member):
         return False
 
 
+def apple_wallet_mark_card_updated(card):
+    if not card or not card.apple_wallet_pass:
+        return False
+    try:
+        pass_record = card.apple_wallet_pass
+        pass_record.mark_updated()
+        db.session.commit()
+        try:
+            apple_wallet_send_push_for_pass(pass_record)
+        except Exception:
+            pass
+        return True
+    except Exception as error:
+        db.session.rollback()
+        print(f"Apple Wallet card update tag bump failed for card {card.id}: {error}")
+        return False
+
+
 def apple_wallet_next_service_text(member):
     appointment = (
         Appointment.query.filter_by(member_id=member.id)
@@ -1090,18 +1403,65 @@ def apple_wallet_next_service_text(member):
     )
 
 
-def apple_wallet_payload(member):
-    public_url = member_public_url(member)
-    schedule_url = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}"
-    buy_url = f"{resolve_public_base_url()}{url_for('public_member_buy', token=member.token)}"
-    vehicle = member_primary_vehicle(member)
+def apple_wallet_card_payload(card, pass_record):
+    member = card.member if card else pass_record.member
+    sales_rep = card.sales_rep if card else None
+    public_url = member_public_url(member) if member else ""
+    schedule_url = f"{resolve_public_base_url()}{url_for('public_new_appointment', token=member.token)}" if member else ""
+    buy_url = f"{resolve_public_base_url()}{url_for('public_member_buy', token=member.token)}" if member else ""
+    vehicle = member_primary_vehicle(member) if member else None
     vehicle_text = vehicle.display_name if vehicle else "No vehicle registered"
-    status_text = current_member_status(member).replace("_", " ").title()
-    pass_record = AppleWalletPass.get_or_create_for_member(member)
+    status_text = current_member_status(member).replace("_", " ").title() if member else ""
+    display_name = member.name if member else sales_rep.name
+    back_fields = []
+    if member:
+        back_fields = [
+            {"key": "vehicle", "label": "Vehicle", "value": vehicle_text},
+            {"key": "expiration_date", "label": "Expiration", "value": member.expiration_date.strftime("%B %d, %Y")},
+            {"key": "member_id", "label": "Member ID", "value": member.member_id},
+            {
+                "key": "schedule_service",
+                "label": "Schedule Service",
+                "value": "Tap to schedule service",
+                "attributedValue": f'<a href="{html.escape(schedule_url, quote=True)}">Schedule Service</a>',
+            },
+            {
+                "key": "manage_membership",
+                "label": "Manage Membership",
+                "value": "Tap to manage membership",
+                "attributedValue": f'<a href="{html.escape(public_url, quote=True)}">Manage Membership</a>',
+            },
+        ]
+        if member.remaining_changes == 0:
+            back_fields.append({
+                "key": "buy_more_oil_changes",
+                "label": "Buy More Oil Changes",
+                "value": "Tap to purchase",
+                "attributedValue": f'<a href="{html.escape(buy_url, quote=True)}">Tap to purchase</a>',
+            })
+    if sales_rep:
+        sales_link = f"{resolve_public_base_url()}{url_for('sales_rep_referral', slug=sales_rep.slug)}"
+        back_fields.extend([
+            {"key": "sales_rep_role", "label": "Role", "value": "Sales Representative"},
+            {"key": "sales_link", "label": "My Sales Link", "value": "Tap to share", "attributedValue": f'<a href="{html.escape(sales_link, quote=True)}">My Sales Link</a>'},
+            {"key": "sales_portal", "label": "Sales Rep Portal", "value": "Tap to sign in", "attributedValue": f'<a href="{html.escape(resolve_public_base_url() + url_for("sales_login"), quote=True)}">Sales Rep Portal</a>'},
+            {"key": "sales_earnings", "label": "My Earnings", "value": "Tap to view", "attributedValue": f'<a href="{html.escape(resolve_public_base_url() + url_for("sales_dashboard"), quote=True)}">My Earnings</a>'},
+        ])
+    barcode_url = public_url or f"{resolve_public_base_url()}{url_for('public_carnova_card', stable_card_token=card.stable_card_token)}"
+    secondary_fields = []
+    auxiliary_fields = []
+    if member:
+        secondary_fields = [
+            {"key": "remaining_changes", "label": "Oil Changes Left", "value": str(member.remaining_changes)},
+            {"key": "status", "label": "Membership Status", "value": status_text},
+        ]
+        auxiliary_fields = [{"key": "next_service", "label": "Next Service", "value": apple_wallet_next_service_text(member)}]
+    else:
+        secondary_fields = [{"key": "role", "label": "Role", "value": "Sales Representative"}]
     return {
         "formatVersion": 1,
         "passTypeIdentifier": os.environ.get("APPLE_PASS_TYPE_ID", ""),
-        "serialNumber": apple_wallet_member_serial(member),
+        "serialNumber": pass_record.serial_number,
         "teamIdentifier": os.environ.get("APPLE_TEAM_ID", ""),
         "organizationName": "Carnova Oil Club",
         "description": "Carnova Oil Club Membership",
@@ -1113,49 +1473,28 @@ def apple_wallet_payload(member):
         "authenticationToken": pass_record.authentication_token,
         "barcode": {
             "format": "PKBarcodeFormatQR",
-            "message": public_url,
+            "message": barcode_url,
             "messageEncoding": "iso-8859-1",
         },
         "generic": {
             "primaryFields": [
-                {"key": "member_name", "label": "Member", "value": member.name},
+                {"key": "member_name", "label": "Member", "value": display_name},
             ],
-            "secondaryFields": [
-                {"key": "remaining_changes", "label": "Oil Changes Left", "value": str(member.remaining_changes)},
-                {"key": "status", "label": "Membership Status", "value": status_text},
-            ],
-            "auxiliaryFields": [
-                {"key": "next_service", "label": "Next Service", "value": apple_wallet_next_service_text(member)},
-            ],
-            "backFields": [
-                {"key": "vehicle", "label": "Vehicle", "value": vehicle_text},
-                {"key": "expiration_date", "label": "Expiration", "value": member.expiration_date.strftime("%B %d, %Y")},
-                {"key": "member_id", "label": "Member ID", "value": member.member_id},
-                {
-                    "key": "schedule_service",
-                    "label": "Schedule Service",
-                    "value": "Tap to schedule service",
-                    "attributedValue": f'<a href="{html.escape(schedule_url, quote=True)}">Schedule Service</a>',
-                },
-                {
-                    "key": "manage_membership",
-                    "label": "Manage Membership",
-                    "value": "Tap to manage membership",
-                    "attributedValue": f'<a href="{html.escape(public_url, quote=True)}">Manage Membership</a>',
-                },
-                *(
-                    [{
-                        "key": "buy_more_oil_changes",
-                        "label": "Buy More Oil Changes",
-                        "value": "Tap to purchase",
-                        "attributedValue": f'<a href="{html.escape(buy_url, quote=True)}">Tap to purchase</a>',
-                    }]
-                    if member.remaining_changes == 0
-                    else []
-                ),
-            ],
+            "secondaryFields": secondary_fields,
+            "auxiliaryFields": auxiliary_fields,
+            "backFields": back_fields,
         },
     }
+
+
+def apple_wallet_payload(member):
+    pass_record = AppleWalletPass.get_or_create_for_member(member)
+    card = member.carnova_card
+    if card and pass_record.carnova_card_id != card.id:
+        pass_record.carnova_card_id = card.id
+        db.session.add(pass_record)
+        db.session.commit()
+    return apple_wallet_card_payload(card, pass_record)
 
 
 def apple_wallet_create_image_asset(source_path, target_path, size):
@@ -1166,7 +1505,7 @@ def apple_wallet_create_image_asset(source_path, target_path, size):
     image.save(target_path, format="PNG")
 
 
-def apple_wallet_build_bundle(member):
+def apple_wallet_build_bundle(member=None, card=None):
     secret_paths = apple_wallet_secret_paths()
     missing = [path for path in secret_paths.values() if not os.path.exists(path)]
     if missing:
@@ -1185,7 +1524,22 @@ def apple_wallet_build_bundle(member):
     apple_wallet_create_image_asset(source_logo, base_dir / "logo.png", (160, 50))
     apple_wallet_create_image_asset(source_logo, base_dir / "logo@2x.png", (320, 100))
 
-    pass_json = apple_wallet_payload(member)
+    card = card or (member.carnova_card if member else None)
+    if not card and member:
+        pass_record = AppleWalletPass.get_or_create_for_member(member)
+        pass_json = apple_wallet_payload(member)
+    elif not card:
+        raise ValueError("Apple Wallet card identity is missing.")
+    else:
+        pass_record = card.apple_wallet_pass
+        if not pass_record and card.member:
+            pass_record = AppleWalletPass.get_or_create_for_member(card.member)
+            if pass_record.carnova_card_id != card.id:
+                pass_record.carnova_card_id = card.id
+                db.session.commit()
+        if not pass_record:
+            pass_record = AppleWalletPass.create_for_card(card)
+        pass_json = apple_wallet_card_payload(card, pass_record)
     (base_dir / "pass.json").write_text(json.dumps(pass_json, indent=2), encoding="utf-8")
 
     manifest = {}
@@ -1221,7 +1575,7 @@ def apple_wallet_build_bundle(member):
         capture_output=True,
     )
 
-    bundle_path = base_dir / f"{member.member_id}.pkpass"
+    bundle_path = base_dir / f"{pass_record.serial_number}.pkpass"
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         for file_path in sorted(base_dir.iterdir()):
             if file_path == bundle_path:
@@ -3180,7 +3534,10 @@ def apple_wallet_latest_pass(pass_type_identifier, serial_number):
         return {"error": "invalid_authentication_token"}, 401
 
     try:
-        bundle_path = apple_wallet_build_bundle(pass_record.member)
+        if pass_record.carnova_card:
+            bundle_path = apple_wallet_build_bundle(member=pass_record.member, card=pass_record.carnova_card)
+        else:
+            bundle_path = apple_wallet_build_bundle(pass_record.member)
     except FileNotFoundError:
         return "Apple Wallet is not configured for this environment.", 503
     except subprocess.CalledProcessError:
@@ -3190,7 +3547,7 @@ def apple_wallet_latest_pass(pass_type_identifier, serial_number):
         bundle_path,
         mimetype="application/vnd.apple.pkpass",
         as_attachment=False,
-        download_name=f"{pass_record.member.member_id}-membership.pkpass",
+        download_name=f"{pass_record.serial_number}.pkpass",
     )
 
 
@@ -3485,6 +3842,25 @@ def google_wallet_object_id(member):
     return f"{issuer_id}.carnova_{safe_member_id}"
 
 
+def google_wallet_card_object_id(card):
+    if not card:
+        return ""
+    if card.google_object_id:
+        return card.google_object_id
+    issuer_id = os.environ.get("GOOGLE_WALLET_ISSUER_ID", "").strip()
+    if not issuer_id:
+        return ""
+    if card.member:
+        object_id = google_wallet_object_id(card.member)
+    else:
+        safe_token = re.sub(r"[^a-zA-Z0-9._-]", "_", (card.stable_card_token or "").lower())
+        object_id = f"{issuer_id}.carnova_card_{safe_token}"
+    card.google_object_id = object_id
+    db.session.add(card)
+    db.session.commit()
+    return object_id
+
+
 def google_wallet_member_state(member):
     status_value = current_member_status(member)
     if status_value == "active":
@@ -3596,7 +3972,70 @@ def google_wallet_class_payload():
     }
 
 
+def google_wallet_card_object_payload(card):
+    member = card.member
+    sales_rep = card.sales_rep
+    if not member and not sales_rep:
+        raise ValueError("Google Wallet card has no owner")
+    object_id = google_wallet_card_object_id(card)
+    logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-wallet-logo-v2.png"))
+    display_name = member.name if member else sales_rep.name
+    payload = {
+        "id": object_id,
+        "classId": google_wallet_class_id(),
+        "genericType": "GENERIC_OTHER",
+        "state": google_wallet_member_state(member) if member else "ACTIVE",
+        "cardTitle": {"defaultValue": {"language": "en-US", "value": "Carnova Card"}},
+        "header": {"defaultValue": {"language": "en-US", "value": "Carnova Card"}},
+        "subheader": {"defaultValue": {"language": "en-US", "value": display_name}},
+        "hexBackgroundColor": "#101820",
+        "textModulesData": [],
+    }
+    if member:
+        payload["textModulesData"] = [
+            {"id": "remaining_changes", "header": "Oil Changes Left", "body": google_wallet_remaining_changes_text(member.remaining_changes)},
+            {"id": "next_service", "header": "Next Service", "body": google_wallet_next_service_text(member)},
+            {"id": "total_changes", "header": "Package Total Oil Changes", "body": str(member.total_changes)},
+            {"id": "membership_status", "header": "Membership Status", "body": current_member_status(member).title()},
+            {"id": "expiration_date", "header": "Expiration Date", "body": member.expiration_date.strftime("%B %d, %Y")},
+        ]
+        payload["barcode"] = {"type": "QR_CODE", "value": member_public_url(member), "alternateText": member.member_id}
+        payload["validTimeInterval"] = {"end": {"date": f"{member.expiration_date.isoformat()}T23:59:59Z"}}
+    elif sales_rep:
+        sales_url = google_wallet_public_https_url(url_for("public_carnova_card", stable_card_token=card.stable_card_token))
+        payload["textModulesData"] = [{"id": "sales_rep_role", "header": "Role", "body": "Sales Representative"}]
+        if sales_url:
+            payload["barcode"] = {"type": "QR_CODE", "value": sales_url, "alternateText": "Sales Representative"}
+
+    links = []
+    if member:
+        manage_url = google_wallet_public_https_url(url_for("member_public", token=member.token))
+        if manage_url:
+            links.append({"uri": manage_url, "description": "Manage Your Package", "id": "manage_package"})
+        schedule_url = google_wallet_public_https_url(url_for("public_new_appointment", token=member.token))
+        if schedule_url:
+            payload["appLinkData"] = {"displayText": {"defaultValue": {"language": "en-US", "value": "Schedule Oil Change"}}, "webAppLinkInfo": {"appTarget": {"targetUri": {"uri": schedule_url, "description": "Schedule Oil Change"}}}}
+    if sales_rep:
+        sales_url = google_wallet_public_https_url(url_for("sales_rep_referral", slug=sales_rep.slug))
+        portal_url = google_wallet_public_https_url(url_for("sales_login"))
+        earnings_url = google_wallet_public_https_url(url_for("sales_dashboard"))
+        if sales_url:
+            links.append({"uri": sales_url, "description": "My Sales Link", "id": "sales_link"})
+        if portal_url:
+            links.append({"uri": portal_url, "description": "Sales Rep Portal", "id": "sales_portal"})
+        if earnings_url:
+            links.append({"uri": earnings_url, "description": "My Earnings", "id": "sales_earnings"})
+    if links:
+        payload["linksModuleData"] = {"uris": links}
+    if logo_url:
+        payload["logo"] = {"sourceUri": {"uri": logo_url}, "contentDescription": {"defaultValue": {"language": "en-US", "value": "Carnova Oil logo"}}}
+    return payload
+
+
 def google_wallet_member_object_payload(member):
+    card = member.carnova_card
+    if card and card.sales_rep:
+        return google_wallet_card_object_payload(card)
     expiration_end = f"{member.expiration_date.isoformat()}T23:59:59Z"
     logo_url = google_wallet_public_https_url(url_for("static", filename="carnova-wallet-logo-v2.png"))
     manage_package_url = google_wallet_public_https_url(url_for("member_public", token=member.token))
@@ -3772,9 +4211,12 @@ def google_wallet_api_call(method, endpoint, payload=None, access_token=None):
         return error.code, parsed_error
 
 
-def google_wallet_upsert_member_object(member, access_token=None):
-    object_id = parse.quote(google_wallet_object_id(member), safe="")
-    payload = google_wallet_member_object_payload(member)
+def google_wallet_upsert_card_object(card, access_token=None):
+    object_id_value = google_wallet_card_object_id(card)
+    if not object_id_value:
+        return False
+    object_id = parse.quote(object_id_value, safe="")
+    payload = google_wallet_card_object_payload(card)
     base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
     object_url = f"{base_url}/genericObject/{object_id}"
     token_value = access_token or google_wallet_access_token()
@@ -3786,18 +4228,41 @@ def google_wallet_upsert_member_object(member, access_token=None):
         return True
 
     if patch_status != 404:
-        print(f"Google Wallet update failed for {member.member_id}: status={patch_status}")
+        print(f"Google Wallet update failed for card {card.id}: status={patch_status}")
         return False
 
     create_status, _ = google_wallet_api_call("POST", f"{base_url}/genericObject", payload, access_token=token_value)
     if create_status in {200, 201, 409}:
         return True
 
+    print(f"Google Wallet create failed for card {card.id}: status={create_status}")
+    return False
+
+
+def google_wallet_upsert_member_object(member, access_token=None):
+    card = member.carnova_card
+    if card and card.sales_rep:
+        return google_wallet_upsert_card_object(card, access_token=access_token)
+    object_id = parse.quote(google_wallet_object_id(member), safe="")
+    payload = google_wallet_member_object_payload(member)
+    base_url = "https://walletobjects.googleapis.com/walletobjects/v1"
+    object_url = f"{base_url}/genericObject/{object_id}"
+    token_value = access_token or google_wallet_access_token()
+    ensure_google_wallet_class(token_value)
+    patch_status, _ = google_wallet_api_call("PATCH", object_url, payload, access_token=token_value)
+    if patch_status in {200, 201}:
+        return True
+    if patch_status != 404:
+        print(f"Google Wallet update failed for {member.member_id}: status={patch_status}")
+        return False
+    create_status, _ = google_wallet_api_call("POST", f"{base_url}/genericObject", payload, access_token=token_value)
+    if create_status in {200, 201, 409}:
+        return True
     print(f"Google Wallet create failed for {member.member_id}: status={create_status}")
     return False
 
 
-def google_wallet_save_url(member):
+def google_wallet_save_url_for_object(object_id):
     credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     signer = service_account.Credentials.from_service_account_file(credentials_path).signer
     issuer_email = google_wallet_service_account_email()
@@ -3810,7 +4275,7 @@ def google_wallet_save_url(member):
         "payload": {
             "genericObjects": [
                 {
-                    "id": google_wallet_object_id(member),
+                    "id": object_id,
                 }
             ]
         },
@@ -3822,6 +4287,13 @@ def google_wallet_save_url(member):
     if isinstance(token, bytes):
         token = token.decode("utf-8")
     return f"https://pay.google.com/gp/v/save/{token}"
+
+
+def google_wallet_save_url(member):
+    card = member.carnova_card
+    if card and card.sales_rep:
+        return google_wallet_save_url_for_object(google_wallet_card_object_id(card))
+    return google_wallet_save_url_for_object(google_wallet_object_id(member))
 
 
 def google_wallet_save_url_is_safe(url):
@@ -3848,6 +4320,16 @@ def sync_member_google_wallet_object(member):
         return False
 
 
+def sync_carnova_card_google_wallet(card):
+    if not google_wallet_is_configured() or not card:
+        return False
+    try:
+        return google_wallet_upsert_card_object(card)
+    except Exception as error:
+        print(f"Google Wallet card sync error for card {card.id}: {error}")
+        return False
+
+
 def sync_member_google_wallet_save_url(member):
     if not google_wallet_is_configured() or not member:
         return None
@@ -3858,6 +4340,84 @@ def sync_member_google_wallet_save_url(member):
     except Exception as error:
         print(f"Google Wallet save URL error for {member.member_id}: {error}")
         return None
+
+
+def ensure_carnova_card(*, member=None, sales_rep=None):
+    """Bind one stable CarnovaCard to the supplied identity roles."""
+    if not member and not sales_rep:
+        return {"card": None, "created": False, "linked": False, "reason": "no_owner"}
+
+    member_card = member.carnova_card if member else None
+    sales_rep_card = sales_rep.carnova_card if sales_rep else None
+    if member_card and sales_rep_card and member_card.id != sales_rep_card.id:
+        print(
+            "CarnovaCard identity conflict: "
+            f"Member {member.id if member else 'none'} and SalesRep {sales_rep.id if sales_rep else 'none'} "
+            "point to different cards"
+        )
+        return {
+            "card": None,
+            "created": False,
+            "linked": False,
+            "reason": "identity_conflict",
+        }
+
+    card = member_card or sales_rep_card
+    created = False
+    if not card:
+        legacy_pass = AppleWalletPass.query.filter_by(member_id=member.id).first() if member else None
+        card = CarnovaCard(
+            member_id=member.id if member else None,
+            sales_rep_id=sales_rep.id if sales_rep else None,
+        )
+        if member and os.environ.get("GOOGLE_WALLET_ISSUER_ID", "").strip():
+            card.google_object_id = google_wallet_object_id(member)
+        created = True
+    else:
+        if member and card.member_id != member.id:
+            card.member_id = member.id
+            card._apple_roles_changed = True
+            card._google_roles_changed = True
+        if sales_rep and card.sales_rep_id != sales_rep.id:
+            card.sales_rep_id = sales_rep.id
+            card._apple_roles_changed = True
+            card._google_roles_changed = True
+        if member and not card.google_object_id and os.environ.get("GOOGLE_WALLET_ISSUER_ID", "").strip():
+            card.google_object_id = google_wallet_object_id(member)
+
+    if not card.member_id and not card.sales_rep_id:
+        return {"card": None, "created": False, "linked": False, "reason": "no_owner"}
+    try:
+        with db.session.begin_nested():
+            db.session.add(card)
+            db.session.flush()
+            if member and not card.apple_wallet_pass:
+                legacy_pass = AppleWalletPass.query.filter_by(member_id=member.id).first()
+                if legacy_pass:
+                    legacy_pass.carnova_card_id = card.id
+                    db.session.add(legacy_pass)
+            if card.apple_wallet_pass and member and card.apple_wallet_pass.member_id != member.id:
+                card.apple_wallet_pass.member_id = member.id
+                db.session.add(card.apple_wallet_pass)
+        if member:
+            member.carnova_card = card
+        if sales_rep:
+            sales_rep.carnova_card = card
+        return {
+            "card": card,
+            "created": created,
+            "linked": not created,
+            "reason": "created" if created else "linked",
+        }
+    except IntegrityError:
+        resolved = None
+        if member:
+            resolved = CarnovaCard.query.filter_by(member_id=member.id).first()
+        if not resolved and sales_rep:
+            resolved = CarnovaCard.query.filter_by(sales_rep_id=sales_rep.id).first()
+        if resolved and (not member or not resolved.member_id or resolved.member_id == member.id) and (not sales_rep or not resolved.sales_rep_id or resolved.sales_rep_id == sales_rep.id):
+            return {"card": resolved, "created": False, "linked": True, "reason": "already_exists"}
+        return {"card": None, "created": False, "linked": False, "reason": "identity_conflict"}
 
 MONTHLY_PRICE_ID = "price_1TxtO7R1GwRFNmYeGo3km5vf"
 MONTHLY_PRICE_ID_ALT = "price_1Txt07R1GwRFNmYeGo3km5vf"
@@ -4318,6 +4878,141 @@ def send_membership_ready_sms(member, checkout_session, sms_consent=False):
     return delivery
 
 
+def automatic_sales_rep_slug(name, member_id):
+    base_slug = referral_slug(name) or f"member-{member_id}"
+    base_slug = base_slug[:80]
+    candidate = base_slug
+    suffix = 2
+    while SalesRep.query.filter_by(slug=candidate).first():
+        suffix_text = f"-{suffix}"
+        candidate = f"{base_slug[:80 - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+    return candidate
+
+
+def ensure_member_sales_rep(
+    member,
+    purchaser_name=None,
+    purchaser_email=None,
+    purchaser_phone=None,
+):
+    """Ensure a fulfilled Member has at most one independent SalesRep identity."""
+    result = {
+        "sales_rep": None,
+        "created": False,
+        "linked": False,
+        "reason": "deferred_for_admin_review",
+    }
+    if not member:
+        return result
+
+    if member.sales_rep:
+        result.update(sales_rep=member.sales_rep, reason="already_linked")
+        return result
+
+    email = (purchaser_email or member.email or "").strip().lower()
+    phone = normalize_us_phone(purchaser_phone or member.phone)
+    candidates = []
+    if email and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        candidates = SalesRep.query.filter(
+            db.or_(
+                db.func.lower(SalesRep.login_email) == email,
+                db.func.lower(SalesRep.email) == email,
+            )
+        ).all()
+        unique_candidates = {candidate.id: candidate for candidate in candidates}
+        candidates = list(unique_candidates.values())
+        if len(candidates) > 1 and phone:
+            phone_candidates = [
+                candidate
+                for candidate in candidates
+                if normalize_us_phone(candidate.phone) == phone
+            ]
+            if len(phone_candidates) == 1:
+                candidates = phone_candidates
+
+    if len(candidates) > 1:
+        print(f"SalesRep association deferred for Member {member.member_id}: ambiguous identity match")
+        return result
+
+    if candidates:
+        candidate = candidates[0]
+        if candidate.member_id and candidate.member_id != member.id:
+            result.update(sales_rep=candidate, reason="existing_rep_linked_elsewhere")
+            print(
+                f"SalesRep association deferred for Member {member.member_id}: "
+                f"SalesRep {candidate.id} is linked to Member {candidate.member_id}"
+            )
+            return result
+        try:
+            with db.session.begin_nested():
+                candidate.member = member
+                db.session.flush()
+            result.update(sales_rep=candidate, linked=True, reason="linked_existing_rep")
+            return result
+        except IntegrityError:
+            linked_rep = SalesRep.query.filter_by(member_id=member.id).first()
+            if linked_rep:
+                result.update(sales_rep=linked_rep, reason="already_linked")
+                return result
+            print(f"SalesRep association deferred for Member {member.member_id}: concurrent link conflict")
+            return result
+
+    if not email or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        print(f"SalesRep association deferred for Member {member.member_id}: invalid email")
+        return result
+
+    login_owner = SalesRep.query.filter(db.func.lower(SalesRep.login_email) == email).first()
+    if login_owner:
+        if login_owner.member_id == member.id:
+            result.update(sales_rep=login_owner, reason="already_linked")
+        elif login_owner.member_id:
+            result.update(sales_rep=login_owner, reason="existing_rep_linked_elsewhere")
+        else:
+            try:
+                with db.session.begin_nested():
+                    login_owner.member = member
+                    db.session.flush()
+                result.update(sales_rep=login_owner, linked=True, reason="linked_existing_rep")
+            except IntegrityError:
+                linked_rep = SalesRep.query.filter_by(member_id=member.id).first()
+                if linked_rep:
+                    result.update(sales_rep=linked_rep, reason="already_linked")
+        return result
+
+    sales_rep = SalesRep(
+        name=(purchaser_name or member.name or "").strip(),
+        slug=automatic_sales_rep_slug(purchaser_name or member.name, member.id),
+        active=True,
+        phone=phone or member.phone or "",
+        email=email,
+        login_email=email,
+        password_hash=None,
+        portal_enabled=False,
+        member_id=member.id,
+    )
+    try:
+        with db.session.begin_nested():
+            db.session.add(sales_rep)
+            member.sales_rep = sales_rep
+            db.session.flush()
+        result.update(sales_rep=sales_rep, created=True, linked=True, reason="created_new_rep")
+        return result
+    except IntegrityError:
+        linked_rep = SalesRep.query.filter_by(member_id=member.id).first()
+        if linked_rep:
+            result.update(sales_rep=linked_rep, reason="already_linked")
+            return result
+        login_owner = SalesRep.query.filter(db.func.lower(SalesRep.login_email) == email).first()
+        if login_owner:
+            result.update(
+                sales_rep=login_owner,
+                reason=("existing_rep_linked_elsewhere" if login_owner.member_id else "deferred_for_admin_review"),
+            )
+        print(f"SalesRep creation deferred for Member {member.member_id}: uniqueness conflict")
+        return result
+
+
 def process_checkout_completed(obj, event_id=None):
     details = obj.get("customer_details") or {}
     shipping = obj.get("shipping_details") or {}
@@ -4426,6 +5121,17 @@ def process_checkout_completed(obj, event_id=None):
             pending.member_id = existing.id
             pending.status = "fulfilled"
             pending.fulfilled_at = pending.fulfilled_at or datetime.utcnow()
+        association = ensure_member_sales_rep(
+            existing,
+            purchaser_name=customer_name,
+            purchaser_email=normalized_email,
+            purchaser_phone=customer_phone,
+        )
+        if existing.sales_rep:
+            existing_card = ensure_carnova_card(member=existing, sales_rep=existing.sales_rep)["card"]
+            existing._apple_card_roles_changed = bool(getattr(existing_card, "_apple_roles_changed", False))
+            existing._google_card_roles_changed = bool(getattr(existing_card, "_google_roles_changed", False))
+        existing._automatic_sales_rep_created = association["created"]
         create_referral_sale(event_id, obj, existing, price_id, selected_plan)
         return existing, False
 
@@ -4464,6 +5170,17 @@ def process_checkout_completed(obj, event_id=None):
         pending.member_id = member.id
         pending.status = "fulfilled"
         pending.fulfilled_at = datetime.utcnow()
+    association = ensure_member_sales_rep(
+        member,
+        purchaser_name=customer_name,
+        purchaser_email=member.email,
+        purchaser_phone=customer_phone,
+    )
+    if member.sales_rep:
+        member_card = ensure_carnova_card(member=member, sales_rep=member.sales_rep)["card"]
+        member._apple_card_roles_changed = bool(getattr(member_card, "_apple_roles_changed", False))
+        member._google_card_roles_changed = bool(getattr(member_card, "_google_roles_changed", False))
+    member._automatic_sales_rep_created = association["created"]
     create_referral_sale(event_id, obj, member, price_id, selected_plan)
     return member, True
 
@@ -4611,6 +5328,18 @@ def stripe_webhook():
         db.session.rollback()
         print("Stripe webhook processing error:", error)
         return "Webhook processing failed", 500
+
+    if member and getattr(member, "_apple_card_roles_changed", False):
+        apple_wallet_mark_card_updated(member.carnova_card)
+    if member and getattr(member, "_google_card_roles_changed", False):
+        sync_carnova_card_google_wallet(member.carnova_card)
+
+    if member and getattr(member, "_automatic_sales_rep_created", False):
+        try:
+            send_automatic_sales_rep_activation(member)
+        except Exception as error:
+            db.session.rollback()
+            print("Automatic SalesRep activation SMS failed:", type(error).__name__)
 
     if ga4_checkout_session:
         send_ga4_purchase_event(ga4_checkout_session)
