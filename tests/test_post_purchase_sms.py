@@ -103,9 +103,14 @@ def test_new_bronze_purchase_sends_one_normalized_sms_with_member_url(client, mo
         delivery = SmsDelivery.query.one()
         assert delivery.status == "sent"
         assert delivery.phone_number == "+15085551234"
-        assert f"/m/{member.token}" in calls[0]["body"]
-        assert calls[0]["to"] == "+15085551234"
-        assert calls[0]["body"] == f"Carnova Oil Club: Your membership is ready! Access your membership and add it to Apple Wallet or Google Wallet: https://example.test/m/{member.token} Please keep this message for future access."
+        assert len(calls) == 2
+        membership_sms = next(call for call in calls if "Your membership is ready" in call["body"])
+        activation_sms = next(call for call in calls if "Carnova Sales Program" in call["body"])
+        assert f"/m/{member.token}" in membership_sms["body"]
+        assert membership_sms["to"] == "+15085551234"
+        assert membership_sms["body"] == f"Carnova Oil Club: Your membership is ready! Access your membership and add it to Apple Wallet or Google Wallet: https://example.test/m/{member.token} Please keep this message for future access."
+        assert "/sales/activate/" in activation_sms["body"]
+        assert "password" not in activation_sms["body"].lower()
 
 
 @pytest.mark.parametrize(
@@ -127,9 +132,11 @@ def test_new_silver_and_gold_purchases_send_one_sms(client, monkeypatch, price_i
     monkeypatch.setattr(stripe.Webhook, "construct_event", lambda *_args, **_kwargs: event)
     monkeypatch.setattr(stripe.checkout.Session, "list_line_items", lambda *_args, **_kwargs: {"data": [{"price": {"id": price_id}}]})
     assert client.post("/stripe/webhook", data=b"payload", headers={"Stripe-Signature": "valid"}).status_code == 200
-    assert len(calls) == 1
+    assert len(calls) == 2
     with flask_app.app_context():
         assert SmsDelivery.query.one().status == "sent"
+    assert sum("Your membership is ready" in call["body"] for call in calls) == 1
+    assert sum("Carnova Sales Program" in call["body"] for call in calls) == 1
 
 
 def test_sms_not_sent_for_invalid_phone(client, monkeypatch):
@@ -179,7 +186,7 @@ def test_webhook_replay_sends_sms_once(client, monkeypatch):
     monkeypatch.setattr(stripe.checkout.Session, "list_line_items", lambda *_args, **_kwargs: {"data": [{"price": {"id": "price_1Tx6veR1GwRFNmYeUO2goMjz"}}]})
     client.post("/stripe/webhook", data=b"payload", headers={"Stripe-Signature": "valid"})
     client.post("/stripe/webhook", data=b"payload", headers={"Stripe-Signature": "valid"})
-    assert len(calls) == 1
+    assert len(calls) == 2
     with flask_app.app_context():
         assert SmsDelivery.query.count() == 1
 
@@ -211,6 +218,8 @@ def test_existing_member_repurchase_does_not_send_membership_ready_sms(client, m
     with flask_app.app_context():
         member = Member(name="Existing", email="existing@example.com", phone="+15085551234", member_id="COC-90000", expiration_date=date.today() + timedelta(days=365), total_changes=3, remaining_changes=3, token="existing-token")
         db.session.add(member)
+        db.session.flush()
+        db.session.add(SalesRep(name="Existing Rep", slug="existing-repurchase-rep", email=member.email, login_email=member.email, member_id=member.id, portal_enabled=True))
         db.session.commit()
         member_id = member.id
     calls = []
