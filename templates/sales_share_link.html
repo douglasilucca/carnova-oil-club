@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}My Sales Link | Carnova Oil Club{% endblock %}
+{% block content %}
+<section class="login-card">
+  <p class="eyebrow gold">CARNOVA</p>
+  <h1>My Sales Link</h1>
+  <p class="muted">Your Personal Sales Link</p>
+  <p class="referral-url">{{ referral_url }}</p>
+  <div class="stack">
+    <button class="button primary" type="button" onclick="carnovaCopyReferralLink('{{ referral_url }}')">Copy My Link</button>
+    <button class="button secondary" type="button" onclick="carnovaShareReferralLink('{{ referral_url }}')">Share My Link</button>
+  </div>
+  <p id="sales-link-feedback" class="feedback" aria-live="polite"></p>
+  <p class="muted">Share your personal link with customers. Qualifying purchases made through your link are credited to your Sales Rep account.</p>
+  <p><a href="{{ url_for('sales_dashboard') }}">Back to Sales Rep Portal</a></p>
+</section>
+<script src="{{ url_for('static', filename='sales-link.js') }}"></script>
+{% endblock %}
