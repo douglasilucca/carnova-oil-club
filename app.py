@@ -1125,6 +1125,49 @@ def refresh_all_apple_wallet_passes():
     return redirect(url_for("sales_reps"))
 
 
+@app.route("/admin/sales-reps/<int:rep_id>/google-wallet/refresh", methods=["POST"])
+@login_required
+def refresh_sales_rep_google_wallet(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    card = rep.carnova_card
+    if not card or not card.google_object_id:
+        flash("No Google Wallet object has been created for this Sales Rep yet.", "info")
+    else:
+        try:
+            refreshed = sync_carnova_card_google_wallet(card)
+        except Exception:
+            refreshed = False
+        flash(
+            "Google Wallet refresh completed." if refreshed else "Google Wallet refresh failed. Please try again.",
+            "success" if refreshed else "error",
+        )
+    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+
+
+@app.route("/admin/google-wallet/refresh-all", methods=["POST"])
+@login_required
+def refresh_all_google_wallet_cards():
+    cards = CarnovaCard.query.filter(
+        CarnovaCard.google_object_id.isnot(None),
+        CarnovaCard.google_object_id != "",
+    ).all()
+    successful = 0
+    for card in cards:
+        try:
+            refreshed = sync_carnova_card_google_wallet(card)
+        except Exception:
+            refreshed = False
+        if refreshed:
+            successful += 1
+    failed = len(cards) - successful
+    category = "success" if failed == 0 else "error"
+    flash(
+        f"Google Wallet refresh: {len(cards)} eligible, {successful} successful, {failed} failed.",
+        category,
+    )
+    return redirect(url_for("sales_reps"))
+
+
 @app.route("/admin/referral-sales/<int:sale_id>/paid", methods=["POST"])
 @login_required
 def mark_referral_sale_paid(sale_id):
