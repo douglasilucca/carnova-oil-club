@@ -885,6 +885,13 @@ def sales_dashboard(rep):
     )
 
 
+@app.route("/sales/share")
+@sales_rep_login_required
+def sales_share_link(rep):
+    referral_url = f"{resolve_public_base_url()}{url_for('sales_rep_referral', slug=rep.slug)}"
+    return render_template("sales_share_link.html", rep=rep, referral_url=referral_url)
+
+
 @app.route("/sales/google-wallet", methods=["POST"])
 @sales_rep_login_required
 def sales_rep_google_wallet(rep):
@@ -1440,7 +1447,7 @@ def apple_wallet_card_payload(card, pass_record):
                 "attributedValue": f'<a href="{html.escape(buy_url, quote=True)}">Tap to purchase</a>',
             })
     if sales_rep:
-        sales_link = f"{resolve_public_base_url()}{url_for('sales_rep_referral', slug=sales_rep.slug)}"
+        sales_link = f"{resolve_public_base_url()}{url_for('sales_share_link')}"
         back_fields.extend([
             {"key": "sales_rep_role", "label": "Role", "value": "Sales Representative"},
             {"key": "sales_link", "label": "My Sales Link", "value": "Tap to share", "attributedValue": f'<a href="{html.escape(sales_link, quote=True)}">My Sales Link</a>'},
@@ -4016,7 +4023,7 @@ def google_wallet_card_object_payload(card):
         if schedule_url:
             payload["appLinkData"] = {"displayText": {"defaultValue": {"language": "en-US", "value": "Schedule Oil Change"}}, "webAppLinkInfo": {"appTarget": {"targetUri": {"uri": schedule_url, "description": "Schedule Oil Change"}}}}
     if sales_rep:
-        sales_url = google_wallet_public_https_url(url_for("sales_rep_referral", slug=sales_rep.slug))
+        sales_url = google_wallet_public_https_url(url_for("sales_share_link"))
         portal_url = google_wallet_public_https_url(url_for("sales_login"))
         earnings_url = google_wallet_public_https_url(url_for("sales_dashboard"))
         if sales_url:
