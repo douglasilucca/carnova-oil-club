@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Sales Reps | Carnova Oil Club{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">REFERRAL PROGRAM</p><h1>Sales Reps</h1><p class="muted">Verified Stripe sales and commission tracking.</p></div></div>
+<div class="page-heading"><div><p class="eyebrow">REFERRAL PROGRAM</p><h1>Sales Reps</h1><p class="muted">Verified Stripe sales and commission tracking.</p></div><form method="post" action="{{ url_for('refresh_all_apple_wallet_passes') }}"><button class="button ghost" type="submit">Refresh All Apple Wallet Passes</button></form></div>
 <section class="panel form-panel">
   <div class="panel-heading"><h2>Add Sales Rep</h2></div>
   <form class="form-grid" method="post">
