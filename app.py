@@ -1094,6 +1094,37 @@ def update_sales_rep_portal_credentials(rep_id):
     return redirect(url_for("sales_rep_detail", rep_id=rep.id))
 
 
+@app.route("/admin/sales-reps/<int:rep_id>/apple-wallet/refresh", methods=["POST"])
+@login_required
+def refresh_sales_rep_apple_wallet(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    card = rep.carnova_card
+    pass_record = card.apple_wallet_pass if card else None
+    if not pass_record:
+        flash("No existing Apple Wallet pass to refresh for this Sales Rep.", "error")
+    elif apple_wallet_refresh_existing_pass(pass_record):
+        flash("Apple Wallet pass refresh triggered.", "success")
+    else:
+        flash("Apple Wallet pass refresh failed. Please try again.", "error")
+    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+
+
+@app.route("/admin/apple-wallet/refresh-all", methods=["POST"])
+@login_required
+def refresh_all_apple_wallet_passes():
+    total = 0
+    refreshed = 0
+    for pass_record in AppleWalletPass.query.all():
+        total += 1
+        if apple_wallet_refresh_existing_pass(pass_record):
+            refreshed += 1
+    if total == 0:
+        flash("No existing Apple Wallet passes to refresh.", "error")
+    else:
+        flash(f"Refreshed {refreshed} of {total} existing Apple Wallet passes.", "success" if refreshed == total else "error")
+    return redirect(url_for("sales_reps"))
+
+
 @app.route("/admin/referral-sales/<int:sale_id>/paid", methods=["POST"])
 @login_required
 def mark_referral_sale_paid(sale_id):
@@ -1390,6 +1421,24 @@ def apple_wallet_mark_card_updated(card):
         db.session.rollback()
         print(f"Apple Wallet card update tag bump failed for card {card.id}: {error}")
         return False
+
+
+def apple_wallet_refresh_existing_pass(pass_record):
+    """Bump the change tag and best-effort push for an already-existing pass. Never creates a pass."""
+    if not pass_record:
+        return False
+    try:
+        pass_record.mark_updated()
+        db.session.commit()
+    except Exception as error:
+        db.session.rollback()
+        print(f"Apple Wallet pass refresh failed for pass {getattr(pass_record, 'id', '?')}: {error}")
+        return False
+    try:
+        apple_wallet_send_push_for_pass(pass_record)
+    except Exception:
+        pass
+    return True
 
 
 def apple_wallet_next_service_text(member):
