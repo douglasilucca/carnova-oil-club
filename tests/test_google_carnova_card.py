@@ -65,6 +65,8 @@ def test_member_sales_rep_payload_has_membership_and_sales_actions(client):
         assert {"manage_package", "sales_link", "sales_portal", "sales_earnings"} <= link_ids
         assert "appLinkData" in payload
         assert payload["barcode"]["value"].endswith("/m/google-member-token")
+        sales_link = next(link for link in payload["linksModuleData"]["uris"] if link["id"] == "sales_link")
+        assert sales_link["uri"].endswith(f"/card/{card.stable_card_token}/share")
 
 
 def test_sales_rep_only_has_stable_neutral_id_and_no_membership_fields(client):
@@ -81,6 +83,8 @@ def test_sales_rep_only_has_stable_neutral_id_and_no_membership_fields(client):
         assert "remaining_changes" not in {module["id"] for module in payload["textModulesData"]}
         assert "appLinkData" not in payload
         assert payload["barcode"]["value"].endswith(f"/card/{card.stable_card_token}")
+        sales_link = next(link for link in payload["linksModuleData"]["uris"] if link["id"] == "sales_link")
+        assert sales_link["uri"].endswith(f"/card/{card.stable_card_token}/share")
 
 
 def test_sales_rep_to_member_keeps_neutral_google_object_id(client):
@@ -122,6 +126,18 @@ def test_authenticated_sales_rep_google_wallet_route_and_unauthenticated_redirec
     response = client.post("/sales/google-wallet")
     assert response.status_code == 302
     assert response.location == "https://pay.google.com/gp/v/save/test"
+
+
+def test_public_card_google_wallet_add_route_is_not_public(client):
+    with flask_app.app_context():
+        rep = make_rep()
+        card = ensure_carnova_card(sales_rep=rep)["card"]
+        db.session.commit()
+        token = card.stable_card_token
+
+    response = client.post(f"/card/{token}/google-wallet")
+
+    assert response.status_code == 404
 
 
 def test_google_sync_failure_does_not_change_card_identity(client, monkeypatch):

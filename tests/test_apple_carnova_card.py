@@ -90,7 +90,7 @@ def test_member_sales_rep_payload_keeps_membership_qr_and_adds_sales_actions(cli
         keys = {field["key"] for field in fields}
         assert {"schedule_service", "manage_membership", "sales_link", "sales_portal", "sales_earnings"} <= keys
         assert payload["barcode"]["message"].endswith("/m/apple-card-member-token")
-        assert any("/sales/share" in field.get("attributedValue", "") for field in fields)
+        assert any(f"/card/{card.stable_card_token}/share" in field.get("attributedValue", "") for field in fields)
         assert not any("/r/apple-card-rep" in field.get("attributedValue", "") for field in fields)
 
 

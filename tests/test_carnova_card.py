@@ -215,3 +215,59 @@ def test_neutral_card_page_does_not_set_referral_attribution(client):
     assert client.get("/r/neutral-rep").status_code == 302
     with client.session_transaction() as saved:
         assert saved["sales_rep_referral"]["sales_rep_id"] == 1
+
+
+def test_public_card_share_page_exposes_exact_referral_link_without_login(client):
+    with flask_app.app_context():
+        rep = make_rep("public-share-rep", "public-share@example.com")
+        card = ensure_carnova_card(sales_rep=rep)["card"]
+        db.session.commit()
+        token = card.stable_card_token
+
+    response = client.get(f"/card/{token}/share")
+
+    assert response.status_code == 200
+    assert b"/r/public-share-rep" in response.data
+    assert b"Copy My Link" in response.data
+    assert b"Share My Link" in response.data
+    assert b"public-share@example.com" not in response.data
+    assert b"correct-password" not in response.data
+    assert b"commission" not in response.data.lower()
+    assert b"earnings" not in response.data.lower()
+    assert b"Add to Apple Wallet" not in response.data
+    assert b"Add to Google Wallet" not in response.data
+    assert b"Sales Rep Portal" not in response.data
+    assert b"internal" not in response.data.lower()
+    assert b"serial" not in response.data.lower()
+    assert b"auth" not in response.data.lower()
+    assert b"google_object_id" not in response.data
+    assert client.get(f"/card/{token}/apple-wallet").status_code == 404
+    assert client.post(f"/card/{token}/google-wallet").status_code == 404
+
+
+def test_public_card_share_page_does_not_set_attribution_and_invalid_tokens_are_safe(client):
+    with flask_app.app_context():
+        rep = make_rep("share-safe-rep", "share-safe@example.com")
+        card = ensure_carnova_card(sales_rep=rep)["card"]
+        db.session.commit()
+        token = card.stable_card_token
+
+    response = client.get(f"/card/{token}/share")
+
+    assert response.status_code == 200
+    with client.session_transaction() as saved:
+        assert "sales_rep_referral" not in saved
+    assert client.get("/card/not-a-real-token/share").status_code == 404
+
+
+def test_card_without_active_sales_rep_cannot_expose_share_page(client):
+    with flask_app.app_context():
+        rep = make_rep("inactive-share-rep", "inactive-share@example.com")
+        rep.active = False
+        card = ensure_carnova_card(sales_rep=rep)["card"]
+        db.session.commit()
+        token = card.stable_card_token
+
+    response = client.get(f"/card/{token}/share")
+
+    assert response.status_code == 404
