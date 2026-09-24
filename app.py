@@ -735,6 +735,19 @@ def public_carnova_card(stable_card_token):
     )
 
 
+@app.route("/card/<stable_card_token>/share")
+def public_carnova_card_share(stable_card_token):
+    card = CarnovaCard.query.filter_by(stable_card_token=stable_card_token).first_or_404()
+    if not card.sales_rep or not card.sales_rep.active:
+        return "Card share link not found", 404
+    referral_url = f"{resolve_public_base_url()}{url_for('sales_rep_referral', slug=card.sales_rep.slug)}"
+    return render_template(
+        "carnova_card_share.html",
+        rep=card.sales_rep,
+        referral_url=referral_url,
+    )
+
+
 @app.route("/sales/login", methods=["GET", "POST"])
 def sales_login():
     if request.method == "POST":
@@ -1539,7 +1552,7 @@ def apple_wallet_card_payload(card, pass_record):
                 "attributedValue": f'<a href="{html.escape(buy_url, quote=True)}">Tap to purchase</a>',
             })
     if sales_rep:
-        sales_link = f"{resolve_public_base_url()}{url_for('sales_share_link')}"
+        sales_link = f"{resolve_public_base_url()}{url_for('public_carnova_card_share', stable_card_token=card.stable_card_token)}"
         back_fields.extend([
             {"key": "sales_rep_role", "label": "Role", "value": "Sales Representative"},
             {"key": "sales_link", "label": "My Sales Link", "value": "Tap to share", "attributedValue": f'<a href="{html.escape(sales_link, quote=True)}">My Sales Link</a>'},
@@ -4115,7 +4128,7 @@ def google_wallet_card_object_payload(card):
         if schedule_url:
             payload["appLinkData"] = {"displayText": {"defaultValue": {"language": "en-US", "value": "Schedule Oil Change"}}, "webAppLinkInfo": {"appTarget": {"targetUri": {"uri": schedule_url, "description": "Schedule Oil Change"}}}}
     if sales_rep:
-        sales_url = google_wallet_public_https_url(url_for("sales_share_link"))
+        sales_url = google_wallet_public_https_url(url_for("public_carnova_card_share", stable_card_token=card.stable_card_token))
         portal_url = google_wallet_public_https_url(url_for("sales_login"))
         earnings_url = google_wallet_public_https_url(url_for("sales_dashboard"))
         if sales_url:
