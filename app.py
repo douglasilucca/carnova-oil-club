@@ -804,6 +804,34 @@ def send_sales_rep_activation_sms(rep, activation_url, message_body=None):
     db.session.commit()
 
 
+def sales_rep_requires_activation(rep):
+    return bool(rep and not rep.password_hash and not rep.portal_enabled)
+
+
+def create_sales_rep_activation_url(rep):
+    token = secrets.token_urlsafe(32)
+    rep.activation_token_hash = sales_rep_activation_hash(token)
+    rep.activation_token_expires_at = datetime.utcnow() + timedelta(hours=24)
+    db.session.commit()
+    return f"{resolve_public_base_url()}{url_for('activate_sales_rep', token=token)}"
+
+
+def send_sales_rep_activation_email(rep, activation_url):
+    subject = "Activate Your Carnova Oil Club Sales Rep Account"
+    text_body = f"""Hello {rep.name},
+
+Welcome to the Carnova Oil Club Sales Rep Program.
+
+Use the secure link below to activate your Sales Rep Portal access and create your password:
+{activation_url}
+
+This activation link expires in 24 hours.
+
+Carnova Oil Club
+"""
+    return send_smtp_email(rep.email, subject, text_body)
+
+
 def send_automatic_sales_rep_activation(member):
     """Prepare and send one activation SMS after checkout has committed."""
     rep = member.sales_rep if member else None
@@ -829,7 +857,7 @@ def send_automatic_sales_rep_activation(member):
         logging.getLogger(__name__).exception("Automatic SalesRep activation preparation failed")
         return False
 
-    activation_url = url_for("activate_sales_rep", token=token, _external=True)
+    activation_url = f"{resolve_public_base_url()}{url_for('activate_sales_rep', token=token)}"
     message_body = (
         "Welcome to Carnova! Your Oil Club membership also gives you access to the "
         "Carnova Sales Program. Share your personal link and earn commissions on "
@@ -1021,6 +1049,81 @@ def sales_rep_detail(rep_id):
         member_options=member_options,
         member_search=member_search,
     )
+
+
+def render_sales_rep_detail_with_activation(rep, activation_url=None):
+    sales = ReferralSale.query.filter_by(sales_rep_id=rep.id).order_by(ReferralSale.created_at.desc()).all()
+    member_search = request.args.get("member_search", "").strip()
+    member_query = Member.query
+    if member_search:
+        search_value = f"%{member_search}%"
+        member_query = member_query.filter(
+            db.or_(
+                Member.name.ilike(search_value),
+                Member.member_id.ilike(search_value),
+                Member.email.ilike(search_value),
+            )
+        )
+    member_options = member_query.order_by(Member.name.asc()).limit(100).all()
+    if rep.member and all(option.id != rep.member.id for option in member_options):
+        member_options.insert(0, rep.member)
+    return render_template(
+        "sales_rep_detail.html",
+        rep=rep,
+        sales=sales,
+        monthly_bonus=calculate_monthly_sales_bonus(sales),
+        member_options=member_options,
+        member_search=member_search,
+        activation_url=activation_url,
+    )
+
+
+@app.route("/admin/sales-reps/<int:rep_id>/activation/sms", methods=["POST"])
+@login_required
+def resend_sales_rep_activation_sms(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    if not sales_rep_requires_activation(rep):
+        flash("This Sales Rep already has active portal access.", "info")
+    elif not normalize_us_phone(rep.phone):
+        flash("Activation SMS unavailable because this Sales Rep has no valid phone number.", "error")
+    else:
+        rep.activation_sms_status = "pending"
+        rep.activation_sms_error = None
+        activation_url = create_sales_rep_activation_url(rep)
+        send_sales_rep_activation_sms(rep, activation_url)
+        if rep.activation_sms_status == "sent":
+            flash("Activation SMS sent successfully.", "success")
+        else:
+            flash("Activation SMS could not be delivered. You can send the activation link by email or copy it manually.", "error")
+    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+
+
+@app.route("/admin/sales-reps/<int:rep_id>/activation/email", methods=["POST"])
+@login_required
+def send_sales_rep_activation_email_route(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    if not sales_rep_requires_activation(rep):
+        flash("This Sales Rep already has active portal access.", "info")
+    elif not rep.email:
+        flash("Activation email unavailable because this Sales Rep has no email address.", "error")
+    else:
+        activation_url = create_sales_rep_activation_url(rep)
+        if send_sales_rep_activation_email(rep, activation_url):
+            flash("Activation email sent successfully.", "success")
+        else:
+            flash("Activation email could not be delivered. You can send the activation link by SMS or copy it manually.", "error")
+    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+
+
+@app.route("/admin/sales-reps/<int:rep_id>/activation/link", methods=["POST"])
+@login_required
+def copy_sales_rep_activation_link(rep_id):
+    rep = db.get_or_404(SalesRep, rep_id)
+    if not sales_rep_requires_activation(rep):
+        flash("This Sales Rep already has active portal access.", "info")
+        return redirect(url_for("sales_rep_detail", rep_id=rep.id))
+    activation_url = create_sales_rep_activation_url(rep)
+    return render_sales_rep_detail_with_activation(rep, activation_url=activation_url)
 
 
 @app.route("/admin/sales-reps/<int:rep_id>/member", methods=["POST"])
