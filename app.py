@@ -36,9 +36,17 @@ from werkzeug.security import check_password_hash, generate_password_hash
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
-database_url = os.environ.get("DATABASE_URL", "sqlite:///oilclub.db")
-if database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+def normalize_database_url(database_url):
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    # Force the installed psycopg2 driver explicitly instead of relying on SQLAlchemy's default dialect resolution.
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return database_url
+
+
+database_url = normalize_database_url(os.environ.get("DATABASE_URL", "sqlite:///oilclub.db"))
 
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
