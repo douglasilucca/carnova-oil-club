@@ -2035,15 +2035,19 @@ def send_smtp_email(recipient, subject, text_body, html_body=None):
     if html_body:
         message.add_alternative(html_body, subtype="html")
 
+    stage = "connect"
     try:
         port = int(os.environ.get("SMTP_PORT", "587"))
-        with smtplib.SMTP(smtp_host, port, timeout=15) as server:
+        with smtplib.SMTP(smtp_host, port, timeout=30) as server:
+            stage = "starttls"
             server.starttls()
+            stage = "login"
             server.login(smtp_user, smtp_password)
+            stage = "send"
             server.send_message(message)
         return True
     except Exception as error:
-        print("EMAIL ERROR:", error)
+        print(f"EMAIL ERROR [{stage}]: {type(error).__name__}: {error}")
         return False
 
 
