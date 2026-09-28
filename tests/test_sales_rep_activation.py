@@ -123,7 +123,7 @@ def test_activation_recovery_actions_require_admin_and_are_post_only(client):
         db.session.add(rep)
         db.session.commit()
         rep_id = rep.id
-    for suffix in ("sms", "email", "link"):
+    for suffix in ("sms", "link"):
         assert client.post(f"/admin/sales-reps/{rep_id}/activation/{suffix}").status_code == 302
         assert client.get(f"/admin/sales-reps/{rep_id}/activation/{suffix}").status_code == 405
 
@@ -137,35 +137,11 @@ def test_activation_recovery_requires_destinations_and_preserves_sms_status(clie
     with client.session_transaction() as saved:
         saved["admin_id"] = 1
     sms_response = client.post(f"/admin/sales-reps/{rep_id}/activation/sms", follow_redirects=True)
-    email_response = client.post(f"/admin/sales-reps/{rep_id}/activation/email", follow_redirects=True)
     assert b"no valid phone" in sms_response.data
-    assert b"no email address" in email_response.data
     with flask_app.app_context():
         rep = db.session.get(SalesRep, rep_id)
         assert rep.activation_token_hash is None
         assert rep.activation_sms_status == "pending"
-
-
-def test_activation_email_uses_configured_sender_and_fresh_activation_url(client, monkeypatch):
-    with flask_app.app_context():
-        rep = SalesRep(name="Email Recovery", slug="email-recovery", email="email-recovery@example.com")
-        db.session.add(rep)
-        db.session.commit()
-        rep_id = rep.id
-    with client.session_transaction() as saved:
-        saved["admin_id"] = 1
-    calls = []
-    monkeypatch.setattr("app.send_smtp_email", lambda *args: calls.append(args) or True)
-    response = client.post(f"/admin/sales-reps/{rep_id}/activation/email", follow_redirects=True)
-    assert response.status_code == 200
-    assert b"Activation email sent successfully" in response.data
-    assert calls[0][0] == "email-recovery@example.com"
-    assert calls[0][1] == "Activate Your Carnova Oil Club Sales Rep Account"
-    assert "/sales/activate/" in calls[0][2]
-    with flask_app.app_context():
-        rep = db.session.get(SalesRep, rep_id)
-        assert rep.activation_token_expires_at > datetime.utcnow()
-        assert rep.activation_token_hash not in calls[0][2]
 
 
 def test_sms_rotation_token_activates_and_raw_token_is_not_logged(client, monkeypatch, caplog):
@@ -211,7 +187,7 @@ def test_copy_activation_link_rotates_hashed_token_and_uses_base_url(client, mon
         assert db.session.get(SalesRep, rep_id).activation_token_hash != first_hash
 
 
-def test_activation_sms_email_failures_preserve_rep_state(client, monkeypatch):
+def test_activation_sms_failure_preserves_rep_state(client, monkeypatch):
     with flask_app.app_context():
         rep = SalesRep(name="Recovery Rep", slug="recovery-rep", email="recovery@example.com", phone="+15551234567")
         db.session.add(rep)
@@ -220,9 +196,7 @@ def test_activation_sms_email_failures_preserve_rep_state(client, monkeypatch):
     with client.session_transaction() as saved:
         saved["admin_id"] = 1
     monkeypatch.setattr("app.send_sales_rep_activation_sms", lambda _rep, _url: None)
-    monkeypatch.setattr("app.send_sales_rep_activation_email", lambda _rep, _url: False)
     assert client.post(f"/admin/sales-reps/{rep_id}/activation/sms").status_code == 302
-    assert client.post(f"/admin/sales-reps/{rep_id}/activation/email").status_code == 302
     with flask_app.app_context():
         rep = db.session.get(SalesRep, rep_id)
         assert rep.password_hash is None

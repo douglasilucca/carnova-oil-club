@@ -824,22 +824,6 @@ def create_sales_rep_activation_url(rep):
     return f"{resolve_public_base_url()}{url_for('activate_sales_rep', token=token)}"
 
 
-def send_sales_rep_activation_email(rep, activation_url):
-    subject = "Activate Your Carnova Oil Club Sales Rep Account"
-    text_body = f"""Hello {rep.name},
-
-Welcome to the Carnova Oil Club Sales Rep Program.
-
-Use the secure link below to activate your Sales Rep Portal access and create your password:
-{activation_url}
-
-This activation link expires in 24 hours.
-
-Carnova Oil Club
-"""
-    return send_smtp_email(rep.email, subject, text_body)
-
-
 def send_automatic_sales_rep_activation(member):
     """Prepare and send one activation SMS after checkout has committed."""
     rep = member.sales_rep if member else None
@@ -1102,24 +1086,7 @@ def resend_sales_rep_activation_sms(rep_id):
         if rep.activation_sms_status == "sent":
             flash("Activation SMS sent successfully.", "success")
         else:
-            flash("Activation SMS could not be delivered. You can send the activation link by email or copy it manually.", "error")
-    return redirect(url_for("sales_rep_detail", rep_id=rep.id))
-
-
-@app.route("/admin/sales-reps/<int:rep_id>/activation/email", methods=["POST"])
-@login_required
-def send_sales_rep_activation_email_route(rep_id):
-    rep = db.get_or_404(SalesRep, rep_id)
-    if not sales_rep_requires_activation(rep):
-        flash("This Sales Rep already has active portal access.", "info")
-    elif not rep.email:
-        flash("Activation email unavailable because this Sales Rep has no email address.", "error")
-    else:
-        activation_url = create_sales_rep_activation_url(rep)
-        if send_sales_rep_activation_email(rep, activation_url):
-            flash("Activation email sent successfully.", "success")
-        else:
-            flash("Activation email could not be delivered. You can send the activation link by SMS or copy it manually.", "error")
+            flash("Activation SMS could not be delivered. You can copy the activation link manually.", "error")
     return redirect(url_for("sales_rep_detail", rep_id=rep.id))
 
 
