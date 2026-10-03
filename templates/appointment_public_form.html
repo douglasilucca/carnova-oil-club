@@ -33,6 +33,7 @@
     <form method="get" class="booking-date-form">
       <label>Select a date
         <input type="date" name="appointment_date" min="{{ today.isoformat() }}" max="{{ max_date.isoformat() }}" value="{{ selected_date.isoformat() if selected_date else '' }}" required>
+        <small>Appointments are available Monday through Friday.</small>
       </label>
       <button class="button primary">View Available Times</button>
     </form>
@@ -86,4 +87,19 @@
 
   <a class="back-link" href="{{ url_for('member_public', token=member.token) }}">← Return to digital card</a>
 </section>
+<script>
+  (() => {
+    const dateInput = document.querySelector('.booking-date-form input[name="appointment_date"]');
+    if (!dateInput) return;
+
+    const validateWeekday = () => {
+      const day = dateInput.value ? new Date(`${dateInput.value}T00:00:00Z`).getUTCDay() : null;
+      dateInput.setCustomValidity(day === 0 || day === 6 ? "Please select a weekday." : "");
+    };
+
+    dateInput.addEventListener("input", validateWeekday);
+    dateInput.addEventListener("change", validateWeekday);
+    validateWeekday();
+  })();
+</script>
 {% endblock %}

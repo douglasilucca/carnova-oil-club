@@ -620,6 +620,8 @@ def test_wallet_origin_vehicle_flow_returns_to_scheduling_with_new_vehicle(clien
 
     appointment_url = "/m/multi-vehicle-token/appointments/new"
     appointment_date = date.today() + timedelta(days=1)
+    while appointment_date.weekday() >= 5:
+        appointment_date += timedelta(days=1)
     page_response = client.get(appointment_url)
 
     assert page_response.status_code == 200
@@ -761,6 +763,46 @@ def test_public_appointment_requires_owned_vehicle(client):
 
     assert response.status_code == 200
     assert b"Please select one of your registered vehicles." in response.data
+    with flask_app.app_context():
+        assert Appointment.query.count() == 0
+
+
+@pytest.mark.parametrize("weekday", [5, 6])
+def test_public_appointment_rejects_weekend_dates(client, weekday):
+    with flask_app.app_context():
+        member = Member(
+            name="Weekend Appointment Member",
+            email=f"weekend-{weekday}@example.com",
+            member_id=f"COC-0093{weekday}",
+            expiration_date=date.today() + timedelta(days=365),
+            token=f"weekend-appointment-{weekday}-token",
+        )
+        db.session.add(member)
+        db.session.commit()
+        member_token = member.token
+
+    days_ahead = (weekday - date.today().weekday()) % 7
+    appointment_date = date.today() + timedelta(days=days_ahead)
+    appointment_url = f"/m/{member_token}/appointments/new"
+
+    page_response = client.get(
+        appointment_url,
+        query_string={"appointment_date": appointment_date.isoformat()},
+        follow_redirects=True,
+    )
+    assert page_response.status_code == 200
+    assert b"Appointments are not available on weekends." in page_response.data
+
+    post_response = client.post(
+        appointment_url,
+        data={
+            "appointment_date": appointment_date.isoformat(),
+            "appointment_time": "09:00",
+        },
+        follow_redirects=True,
+    )
+    assert post_response.status_code == 200
+    assert b"Appointments are not available on weekends." in post_response.data
     with flask_app.app_context():
         assert Appointment.query.count() == 0
 
