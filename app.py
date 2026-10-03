@@ -1909,7 +1909,7 @@ def refresh_member_statuses():
 
 
 def appointment_slots_for_day(day):
-    if day.weekday() == 6:
+    if day.weekday() >= 5:
         return []
 
     start_hour = int(os.environ.get("APPOINTMENT_START_HOUR", "9"))
@@ -3395,8 +3395,11 @@ def public_new_appointment(token):
             if selected_date < date.today() or selected_date > max_date:
                 flash("Please select a date within the available booking window.", "error")
                 selected_date = None
-            elif selected_date.weekday() == 6:
-                flash("The service department is closed on Sundays.", "error")
+            elif selected_date.weekday() >= 5:
+                flash("Appointments are not available on weekends.", "error")
+                selected_date = None
+                if request.method == "POST":
+                    return redirect(url_for("public_new_appointment", token=member.token))
             else:
                 available_slots = appointment_slots_for_day(selected_date)
         except ValueError:
