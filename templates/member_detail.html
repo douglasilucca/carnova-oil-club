@@ -56,12 +56,32 @@
   </article>
 </section>
 
-{% if sms_deliveries %}
 <section class="panel">
-  <div class="panel-heading"><div><p class="eyebrow">MESSAGING</p><h2>Membership SMS</h2></div></div>
-  {% for delivery in sms_deliveries %}<p><span class="badge {{ delivery.status }}">{{ delivery.status|replace('_', ' ')|title }}</span></p>{% endfor %}
+  <div class="panel-heading"><div><p class="eyebrow">MEMBER ACCESS</p><h2>CARD ACCESS &amp; SMS</h2></div></div>
+  <dl class="details">
+    <div><dt>Phone</dt><dd>{{ 'Available' if member.phone else 'Missing' }}</dd></div>
+    <div><dt>SMS Status</dt><dd>
+      {% if membership_sms and membership_sms.status == 'sent' %}Sent
+      {% elif membership_sms and membership_sms.status == 'failed' %}Failed
+      {% elif membership_sms and membership_sms.status == 'no_consent' %}No Consent
+      {% else %}Not Sent{% endif %}
+    </dd></div>
+  </dl>
+  <div class="actions">
+    <form method="post" action="{{ url_for('resend_member_card_sms', member_id=member.member_id) }}">
+      <button class="button primary" type="submit" {% if not member.phone %}disabled{% endif %}>Resend Card SMS</button>
+    </form>
+    <form method="post" action="{{ url_for('show_member_card_access_link', member_id=member.member_id) }}">
+      <button class="button secondary" type="submit">Generate / Copy Card Access Link</button>
+    </form>
+  </div>
+  {% if card_access_url %}
+  <label class="wide">Card Access Link
+    <input id="card-access-link" readonly value="{{ card_access_url }}">
+    <button class="button ghost" type="button" onclick="navigator.clipboard ? navigator.clipboard.writeText(document.getElementById('card-access-link').value).then(function(){this.textContent='Card access link copied.'}.bind(this)) : document.getElementById('card-access-link').select()">Copy Card Access Link</button>
+  </label>
+  {% endif %}
 </section>
-{% endif %}
 
 <section class="panel">
   <div class="panel-heading">
