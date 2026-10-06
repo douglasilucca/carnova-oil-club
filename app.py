@@ -2973,6 +2973,7 @@ def create_new_customer_checkout(plan_key):
         checkout_session = stripe.checkout.Session.create(
             mode="payment",
             line_items=[{"price": plan_key, "quantity": 1}],
+            phone_number_collection={"enabled": True},
             success_url=f"{resolve_public_base_url()}{url_for('new_customer_purchase_success', public_token=pending.public_token)}",
             cancel_url=f"{resolve_public_base_url()}{url_for('new_customer_purchase', _external=False)}",
             customer_email=email,
@@ -3025,6 +3026,7 @@ def public_member_buy_plan(token, plan_key):
         checkout_session = stripe.checkout.Session.create(
             mode=mode,
             line_items=[{"price": plan_key, "quantity": 1}],
+            phone_number_collection={"enabled": True},
             success_url=f"{resolve_public_base_url()}{url_for('member_public', token=member.token)}",
             cancel_url=f"{resolve_public_base_url()}{url_for('public_member_buy', token=member.token)}",
             customer_email=member.email,
@@ -3056,6 +3058,10 @@ def public_member_google_wallet_add(token):
 @login_required
 def member_detail(member_id):
     member = Member.query.filter_by(member_id=member_id).first_or_404()
+    return render_member_detail(member)
+
+
+def render_member_detail(member, card_access_url=None):
     member.status = current_member_status(member)
     db.session.commit()
 
@@ -3067,6 +3073,10 @@ def member_detail(member_id):
     public_url = member_public_url(member)
     vehicles = Vehicle.query.filter_by(member_id=member.id).order_by(Vehicle.created_at.desc()).all()
     sms_deliveries = SmsDelivery.query.filter_by(member_id=member.id).order_by(SmsDelivery.created_at.desc()).all()
+    membership_sms = next(
+        (delivery for delivery in sms_deliveries if delivery.purpose == "membership_ready"),
+        None,
+    )
     return render_template(
         "member_detail.html",
         member=member,
@@ -3074,7 +3084,44 @@ def member_detail(member_id):
         redemptions=redemptions,
         public_url=public_url,
         sms_deliveries=sms_deliveries,
+        membership_sms=membership_sms,
+        card_access_url=card_access_url,
     )
+
+
+@app.route("/members/<member_id>/card-sms/resend", methods=["POST"])
+@login_required
+def resend_member_card_sms(member_id):
+    member = Member.query.filter_by(member_id=member_id).first_or_404()
+    pending = PendingCheckout.query.filter_by(
+        member_id=member.id,
+        status="fulfilled",
+    ).order_by(PendingCheckout.created_at.desc(), PendingCheckout.id.desc()).first()
+    delivery = send_membership_ready_sms(
+        member,
+        {"id": pending.stripe_checkout_session_id if pending else None},
+        sms_consent=bool(pending and pending.sms_consent),
+        retry=True,
+    )
+    if delivery.status == "sent":
+        flash("Card access SMS sent successfully.", "success")
+    elif delivery.status == "no_consent":
+        flash("Card access SMS was not sent because SMS consent is not recorded.", "error")
+    elif delivery.status == "failed":
+        flash("Card access SMS could not be delivered.", "error")
+    elif delivery.last_error == "Invalid US phone number":
+        flash("Card access SMS was not sent because the Member phone number is missing or invalid.", "error")
+    else:
+        flash("Card access SMS could not be sent. Check the delivery status.", "error")
+    return redirect(url_for("member_detail", member_id=member.member_id))
+
+
+@app.route("/members/<member_id>/card-access-link", methods=["POST"])
+@login_required
+def show_member_card_access_link(member_id):
+    member = Member.query.filter_by(member_id=member_id).first_or_404()
+    flash("Card access link is ready for manual delivery.", "success")
+    return render_member_detail(member, card_access_url=member_public_url(member))
 
 
 @app.route("/members/<member_id>/edit", methods=["GET", "POST"])
@@ -5013,32 +5060,39 @@ def send_tiktok_purchase_event(checkout_session, member):
         print("TikTok purchase event error:", type(error).__name__)
 
 
-def send_membership_ready_sms(member, checkout_session, sms_consent=False):
+def send_membership_ready_sms(member, checkout_session, sms_consent=False, retry=False):
     phone_number = normalize_us_phone(member.phone)
     delivery = SmsDelivery.query.filter_by(member_id=member.id, purpose="membership_ready").first()
-    if delivery:
+    if delivery and not retry:
         return delivery
 
-    delivery = SmsDelivery(
-        member_id=member.id,
-        referral_sale_id=ReferralSale.query.filter_by(
-            stripe_checkout_session_id=checkout_session.get("id")
-        ).with_entities(ReferralSale.id).scalar(),
-        purpose="membership_ready",
-        phone_number=phone_number or member.phone or "",
-        provider="twilio",
-        status="not_sent",
-    )
-    db.session.add(delivery)
-    db.session.flush()
+    if not delivery:
+        delivery = SmsDelivery(
+            member_id=member.id,
+            referral_sale_id=ReferralSale.query.filter_by(
+                stripe_checkout_session_id=checkout_session.get("id")
+            ).with_entities(ReferralSale.id).scalar(),
+            purpose="membership_ready",
+            phone_number=phone_number or member.phone or "",
+            provider="twilio",
+            status="not_sent",
+        )
+        db.session.add(delivery)
+        db.session.flush()
+    elif retry:
+        delivery.phone_number = phone_number or member.phone or ""
     # SMS consent only affects whether we attempt delivery; fulfillment is already committed above this point.
     if not sms_consent:
         delivery.status = "no_consent"
         delivery.last_error = "Customer did not opt in to SMS"
+        if retry:
+            delivery.attempts += 1
         db.session.commit()
         return delivery
     if not phone_number:
+        delivery.status = "not_sent"
         delivery.last_error = "Invalid US phone number"
+        delivery.attempts += 1
         db.session.commit()
         return delivery
 
@@ -5046,13 +5100,16 @@ def send_membership_ready_sms(member, checkout_session, sms_consent=False):
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
     from_number = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
     if not account_sid or not auth_token or not from_number:
+        delivery.status = "not_sent"
         delivery.last_error = "Twilio is not configured"
+        delivery.attempts += 1
         db.session.commit()
         return delivery
 
     delivery.phone_number = phone_number
     delivery.status = "sending"
-    delivery.attempts = 1
+    delivery.last_error = None
+    delivery.attempts += 1
     db.session.commit()
     try:
         message = TwilioClient(account_sid, auth_token).messages.create(
@@ -5228,7 +5285,7 @@ def process_checkout_completed(obj, event_id=None):
         or metadata.get("customer_name")
         or obj.get("customer_name")
     )
-    customer_phone = (pending.phone if pending else "") or details.get("phone") or shipping.get("phone") or ""
+    customer_phone = details.get("phone") or (pending.phone if pending else "") or shipping.get("phone") or ""
     customer_id = stripe_object_id(obj.get("customer"))
     subscription_id = stripe_object_id(obj.get("subscription"))
     payment_id = stripe_object_id(obj.get("payment_intent")) or obj.get("id")

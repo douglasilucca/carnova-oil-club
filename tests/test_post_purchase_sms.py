@@ -48,7 +48,7 @@ def pending_checkout(price_id, phone="(508) 555-1234", sms_consent=True):
     )
 
 
-def webhook_event(pending, price_id="price_1Tx6veR1GwRFNmYeUO2goMjz", event_id="evt-sms"):
+def webhook_event(pending, price_id="price_1Tx6veR1GwRFNmYeUO2goMjz", event_id="evt-sms", stripe_phone="+19995551234"):
     return {
         "id": event_id,
         "type": "checkout.session.completed",
@@ -56,7 +56,7 @@ def webhook_event(pending, price_id="price_1Tx6veR1GwRFNmYeUO2goMjz", event_id="
             "id": pending.stripe_checkout_session_id,
             "mode": "payment",
             "payment_intent": "pi-sms",
-            "customer_details": {"email": pending.email, "name": pending.name, "phone": "+19995551234"},
+            "customer_details": {"email": pending.email, "name": pending.name, **({"phone": stripe_phone} if stripe_phone else {})},
             "amount_total": 14900,
             "metadata": {"pending_checkout_token": pending.public_token, "sales_rep_id": "999"},
         }},
@@ -102,12 +102,12 @@ def test_new_bronze_purchase_sends_one_normalized_sms_with_member_url(client, mo
         member = Member.query.filter_by(email="sms@example.com").one()
         delivery = SmsDelivery.query.one()
         assert delivery.status == "sent"
-        assert delivery.phone_number == "+15085551234"
+        assert delivery.phone_number == "+19995551234"
         assert len(calls) == 2
         membership_sms = next(call for call in calls if "Your membership is ready" in call["body"])
         activation_sms = next(call for call in calls if "Carnova Sales Program" in call["body"])
         assert f"/m/{member.token}" in membership_sms["body"]
-        assert membership_sms["to"] == "+15085551234"
+        assert membership_sms["to"] == "+19995551234"
         assert membership_sms["body"] == f"Carnova Oil Club: Your membership is ready! Access your membership and add it to Apple Wallet or Google Wallet: https://example.test/m/{member.token} Please keep this message for future access."
         assert "/sales/activate/" in activation_sms["body"]
         assert "password" not in activation_sms["body"].lower()
@@ -147,7 +147,7 @@ def test_sms_not_sent_for_invalid_phone(client, monkeypatch):
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "auth_test")
     monkeypatch.setenv("TWILIO_FROM_NUMBER", "+15085550000")
     monkeypatch.setattr("app.TwilioClient", lambda sid, token: FakeTwilio(sid, token, calls))
-    event = webhook_event(pending)
+    event = webhook_event(pending, stripe_phone=None)
     monkeypatch.setattr(stripe.Webhook, "construct_event", lambda *_args, **_kwargs: event)
     monkeypatch.setattr(stripe.checkout.Session, "list_line_items", lambda *_args, **_kwargs: {"data": [{"price": {"id": "price_1Tx6veR1GwRFNmYeUO2goMjz"}}]})
     assert client.post("/stripe/webhook", data=b"payload", headers={"Stripe-Signature": "valid"}).status_code == 200
